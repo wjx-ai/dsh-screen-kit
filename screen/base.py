@@ -101,6 +101,15 @@ class Backend:
     def foreground(self) -> Any:
         return None
 
+    def ensure_active(self, x: int, y: int) -> bool:
+        """保证 (x, y) 所在的窗口是活动窗口。默认不做任何事。
+
+        为什么需要: 有些应用 (Electron、自绘界面) 只在自己是前台窗口时才把点击
+        传给控件 —— 非前台时第一次点击只当"激活窗口", 控件收不到。
+        表现就是"OCR 明明找到了按钮, 点下去什么也没发生"。
+        """
+        return True
+
     # ---- 元信息 ----------------------------------------------------------
 
     def capabilities(self) -> Capabilities:

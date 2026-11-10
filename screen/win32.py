@@ -30,6 +30,7 @@ ULONG_PTR = ctypes.c_void_p
 SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN = 76, 77
 SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN = 78, 79
 SW_RESTORE = 9
+GA_ROOT = 2
 
 INPUT_MOUSE, INPUT_KEYBOARD = 0, 1
 MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP = 0x0002, 0x0004
@@ -379,7 +380,9 @@ class WindowsBackend(Backend):
             if fg_thread and fg_thread != current:
                 attached = bool(user32.AttachThreadInput(fg_thread, current, True))
             user32.BringWindowToTop(hwnd)
-            user32.ShowWindow(hwnd, SW_RESTORE)
+            # 注意: 这里绝不能再无条件调 ShowWindow(SW_RESTORE) ——
+            # 对已最大化的窗口它会取消最大化, 每点一次窗口就缩一次,
+            # 布局随之变化, 之后所有坐标都失效。只有最小化时才恢复。
             ok = bool(user32.SetForegroundWindow(hwnd))
             user32.SetFocus(hwnd)
             return ok or self.foreground() == int(handle)
@@ -388,6 +391,30 @@ class WindowsBackend(Backend):
                 user32.AttachThreadInput(fg_thread, current, False)
 
     # ---- 元信息 --------------------------------------------------------
+
+    _point_protos_ready = False
+
+    def ensure_active(self, x: int, y: int) -> bool:
+        """把 (x, y) 所在的顶层窗口顶到前台。
+
+        真实事故: 批量开票跑得好好的, 用户切到浏览器看了一眼, 之后每次都报
+        "点了开票但没出现" —— 因为这个应用的工具栏按钮在前台窗口之外时不响应点击。
+        每点一次先确认窗口是活动的, 这类假失败就消失了。
+        """
+        if not WindowsBackend._point_protos_ready:
+            user32.WindowFromPoint.argtypes = [wintypes.POINT]
+            user32.WindowFromPoint.restype = H
+            user32.GetAncestor.argtypes = [H, ctypes.c_uint]
+            user32.GetAncestor.restype = H
+            WindowsBackend._point_protos_ready = True
+
+        hwnd = user32.WindowFromPoint(wintypes.POINT(int(x), int(y)))
+        if not hwnd:
+            return False
+        root = user32.GetAncestor(hwnd, GA_ROOT) or hwnd
+        if self.foreground() == int(root):
+            return True
+        return self.focus(int(root))
 
     def capabilities(self) -> Capabilities:
         return Capabilities(capture=True, input_mouse=True, input_keys=True, windows=True)

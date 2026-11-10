@@ -59,6 +59,17 @@ class KeyWhitelistTest(unittest.TestCase):
         self.assertIn("esc", str(ctx.exception))
 
 
+class EnsureActiveTest(unittest.TestCase):
+    """点击前"把目标窗口顶到前台"是个可选能力, 不实现也不能让点击挂掉。"""
+
+    def test_default_is_a_noop(self):
+        self.assertTrue(Backend().ensure_active(10, 10),
+                        "没实现 ensure_active 的后端应当直接放行, 而不是抛异常")
+
+    def test_base_class_exposes_it(self):
+        self.assertTrue(hasattr(Backend(), "ensure_active"))
+
+
 class BaseContractTest(unittest.TestCase):
     def test_unimplemented_methods_explain_themselves(self):
         be = Backend()

@@ -88,6 +88,12 @@ def normalize(x: int, y: int):
 
 def click_at(x: int, y: int, button: str = "left", clicks: int = 1) -> None:
     be = backend()
+    # 先把目标窗口顶到前台: 有的应用在后台时根本不响应控件点击,
+    # 表现是"找到了按钮但点了没反应" (批量跑到一半用户切窗口就会这样)。
+    try:
+        be.ensure_active(int(x), int(y))
+    except BackendError:
+        pass
     be.move(int(x), int(y))
     time.sleep(0.02)
     for index in range(max(1, clicks)):
