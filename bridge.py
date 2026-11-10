@@ -69,7 +69,9 @@ def grab(region: str = ""):
             except BackendError:
                 probe = None
         if probe is not None:
-            return probe, 0, 0
+            # 必须把区域原点带回去 —— 否则裁剪图里的坐标会被当成全屏坐标,
+            # 点出去就偏到左上角 (真的点错过一次, 想点 (1661,88) 点到了 (101,39))
+            return probe, rx, ry
     img = be.capture()
     if not region:
         return img, 0, 0
