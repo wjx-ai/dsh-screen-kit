@@ -248,9 +248,19 @@ def cmd_windows(args):
     action = args.get("action", "list")
     be = backend()
     if action == "focus":
+        # 优先按句柄: 同一个应用开了两个同标题窗口时, 标题根本区分不了
+        handle = args.get("handle")
+        if handle is not None:
+            for win in be.windows():
+                if int(win.handle) == int(handle):
+                    done = be.focus(win.handle)
+                    time.sleep(0.4)
+                    return {"ok": bool(done), "focused": win.title,
+                            "handle": win.handle}
+            return {"ok": False, "error": f"没有句柄为 {handle} 的窗口"}
         title = args.get("title", "")
         if not title:
-            return {"ok": False, "error": "需要 title"}
+            return {"ok": False, "error": "需要 title 或 handle"}
         for win in be.windows():
             if title.lower() in (win.title or "").lower():
                 done = be.focus(win.handle)
