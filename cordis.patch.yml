@@ -1,0 +1,4 @@
+- insert:
+    - id: screen-kit
+      name: 'dsh-screen-kit'
+      config: {}

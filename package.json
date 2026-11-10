@@ -1,0 +1,46 @@
+{
+  "name": "dsh-screen-kit",
+  "version": "0.2.0",
+  "description": "Screen reading and mouse/keyboard control for DeepSeek Harness agents: local OCR, precise text clicking, and batch clicking. Windows, macOS and Linux.",
+  "type": "module",
+  "license": "MIT",
+  "author": "wjx-ai",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wjx-ai/dsh-screen-kit.git"
+  },
+  "bugs": {
+    "url": "https://github.com/wjx-ai/dsh-screen-kit/issues"
+  },
+  "homepage": "https://github.com/wjx-ai/dsh-screen-kit#readme",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "cordis",
+    "screen",
+    "screenshot",
+    "ocr",
+    "automation",
+    "mouse",
+    "click",
+    "windows",
+    "macos",
+    "linux"
+  ],
+  "exports": {
+    ".": "./index.js"
+  },
+  "files": [
+    "index.js",
+    "bridge.py",
+    "screen/*.py",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}
