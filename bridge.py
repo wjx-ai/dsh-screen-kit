@@ -220,6 +220,17 @@ def cmd_click_text(args):
                 "near_misses": [h["block"] for h in hits],
                 "hint": "用 screen_read 看看屏幕上实际有什么字"}
     best = solid[0]
+    # 给了区域就再认一遍: 从找到到点击之间界面可能已经变了
+    # (同一个位置上的「开票」可能已经变成「红冲」), 认不出目标文字就不点。
+    region = args.get("region", "")
+    if region:
+        fresh, why = relook(region, needle, best)
+        if fresh is None:
+            return {"ok": False,
+                    "error": f"拒绝点击: {why}, 所以没有点",
+                    "expected": needle,
+                    "hint": "屏幕在两帧之间变了; 用 screen_read 重新看一遍再决定"}
+        best = fresh
     click_at(best["x"], best["y"], args.get("button", "left"), int(args.get("clicks", 1)))
     for h in solid:
         h["nx"], h["ny"] = normalize(h["x"], h["y"])
@@ -270,6 +281,36 @@ def cmd_windows(args):
     items = [w.as_dict() for w in be.windows() if (w.title or "").strip()]
     return {"ok": True, "count": len(items),
             "foreground": be.foreground(), "windows": items}
+
+
+def relook(region: str, needle: str, expected: dict,
+           tolerance: int = 40) -> tuple[dict | None, str]:
+    """按下鼠标之前, 用同一套识别再看一眼: 还在、而且还在原地, 才允许点。
+
+    为什么需要: 从"认出按钮"到"按下鼠标"之间有一段间隔 —— 批处理里是 1.5 秒。
+    这段时间界面可能已经变了。最典型的就是开票成功后, 同一个位置上的
+    「开票￥17.88」变成了「红冲」: 照着旧坐标点下去就是一次冲销操作。
+
+    为什么不用"截一个很小的小方块再 OCR": 试过, 不可靠 —— 125x62 的框里
+    真机上只读出一个「口」, 结果是连正确的按钮都被拒绝(假阴性)。
+    这里复用 locate(): 同样的区域、同样的档位规则, 就是白天一直在跑的那条路。
+
+    返回 (可点的最新位置 or None, 拒绝的原因)。
+    """
+    hits = locate(needle, region, exact=True, max_tier=1)
+    solid = [h for h in hits if not h["fuzzy"]]
+    if not solid:
+        # 拒绝时把那一带实际写着什么报出来, 让人一眼看出发生了什么
+        blocks = ocr_mod.ocr(grab(region)[0])
+        seen = " / ".join(b.text for b in blocks if b.text.strip())
+        return None, f"那里现在是 {seen!r}, 已经不是 {needle!r}"
+    best = min(solid, key=lambda h: (abs(h["x"] - expected["x"])
+                                     + abs(h["y"] - expected["y"])))
+    moved = abs(best["x"] - expected["x"]) + abs(best["y"] - expected["y"])
+    if moved > tolerance:
+        return None, (f"{needle!r} 从 ({expected['x']},{expected['y']}) "
+                      f"移到了 ({best['x']},{best['y']}), 位置变化过大")
+    return best, ""
 
 
 def cmd_batch(args):
@@ -357,6 +398,13 @@ def cmd_batch(args):
     stopped = ""
     for i in range(1, times + 1):
         t0 = time.time()
+        # 工具栏这一下: 点之前重新认一遍, 认不出「开票」就不点。
+        fresh, why = relook(top_region, top_text, top) if top_region else (top, "")
+        if fresh is None:
+            stopped = f"拒绝点击工具栏 ({top['x']},{top['y']}): {why}"
+            note(f"[{i}] {stopped}")
+            break
+        top = fresh
         click_at(top["x"], top["y"])
 
         hit = wait_for(popup_region, popup_text, True, wait_limit) if popup_region else None
@@ -382,6 +430,15 @@ def cmd_batch(args):
                 break
 
         time.sleep(max(0.0, interval - 0.5))
+        # 关键一下: 隔了 interval 秒, 那个坐标上早就未必还是「开票」了。
+        # 开票成功后同一位置会变成「红冲」—— 盲点就是一次冲销操作。
+        fresh, why = relook(popup_region, popup_text, hit) if popup_region else (hit, "")
+        if fresh is None:
+            stopped = f"拒绝点击 ({hit['x']},{hit['y']}): {why}"
+            note(f"[{i}] {stopped}")
+            press_esc()
+            break
+        hit = fresh
         click_at(hit["x"], hit["y"])
 
         if popup_region and not wait_for(popup_region, popup_text, False, 6.0):
