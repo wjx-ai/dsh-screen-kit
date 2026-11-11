@@ -437,16 +437,29 @@ def cmd_batch(args):
         t0 = time.time()
         # 工具栏这一下: 点之前重新认一遍, 认不出「开票」就不点。
         fresh, why = relook(top_region, top_text, top) if top_region else (top, "")
+        if fresh is None and absent_means_empty:
+            # 按钮消失有两种可能: 真的开完了 / 列表正在刷新, 工具栏短暂空白。
+            # 后者在 ABC数字医疗云 上真实发生过: 抢在空白那一瞬间宣布"队列已空",
+            # 一秒后按钮又回来了, 于是白停一次。
+            # 所以先找文字标志 (最可靠), 找不到再等一会儿重看一次。
+            seen_empty = which_empty()
+            if seen_empty:
+                stopped = f"出现 {seen_empty!r} —— 没有可点的了"
+                note(f"[{i}] {stopped}")
+                press_esc()
+                break
+            time.sleep(1.5)
+            recovered = find_in(top_region, top_text) if top_region else None
+            if recovered is not None:
+                fresh = recovered
+                note(f"[{i}] 工具栏短暂空白后恢复, 继续")
         if fresh is None:
-            # 注意: 走到这里说明上一张已经开完 (本轮还没点任何东西),
-            # 按钮消失很可能就是队列空了, 而不是出了错。
             if absent_means_empty:
                 stopped = (f"工具栏上已经没有 {top_text!r} 了 —— 队列已空 "
-                           f"(视同 {empty_text!r})")
-                note(f"[{i}] {stopped}")
+                           f"(视同 {empty_desc})")
             else:
                 stopped = f"拒绝点击工具栏 ({top['x']},{top['y']}): {why}"
-                note(f"[{i}] {stopped}")
+            note(f"[{i}] {stopped}")
             break
         top = fresh
         click_at(top["x"], top["y"])
