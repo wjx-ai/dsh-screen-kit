@@ -87,5 +87,66 @@ class RelookTest(unittest.TestCase):
         self.assertLess(abs(got["x"] - 1899), 60, "应当选离原位置最近的那个")
 
 
+class ClickTextRegressionTest(unittest.TestCase):
+    """relook() 换掉了 best, 而 best 不在 solid 列表里 —— 曾因此抛 KeyError。
+
+    按钮其实已经点出去了, 错误却发生在拼返回值的时候, 调用方看到的是失败。
+    """
+
+    def setUp(self):
+        self._backend = bridge._BACKEND
+        self._ocr = ocr_mod.ocr
+        self._click = bridge.click_at
+        bridge._BACKEND = FakeBackend()
+        ocr_mod.ocr = lambda image: [ocr_mod.TextBlock("开票￥51.18", 1820, 900, 99, 22, 0.9)]
+        self.clicked = []
+        bridge.click_at = lambda *a, **k: self.clicked.append((a, k))
+
+    def tearDown(self):
+        bridge._BACKEND = self._backend
+        ocr_mod.ocr = self._ocr
+        bridge.click_at = self._click
+
+    def test_returns_ok_and_normalized_after_relook(self):
+        result = bridge.cmd_click_text({"text": "开票", "region": REGION})
+        self.assertTrue(result.get("ok"), f"不该失败: {result}")
+        self.assertEqual(len(result["normalized"]), 2,
+                         "返回的归一化坐标不能是旧的/缺失的")
+        self.assertEqual(len(self.clicked), 1, "应该正好点一次")
+
+    def test_refusal_does_not_click(self):
+        ocr_mod.ocr = lambda image: [ocr_mod.TextBlock("红冲", 1820, 900, 60, 22, 0.9)]
+        result = bridge.cmd_click_text({"text": "开票", "region": REGION})
+        self.assertFalse(result.get("ok"))
+        self.assertEqual(self.clicked, [], "拒绝时一次都不能点")
+
+
+class PickEmptyTest(unittest.TestCase):
+    """同一个系统的"没得开"有好几种长相, 都要认出来。
+
+    ABC数字医疗云: 队列空时可能弹「暂无可开发票」,
+    也可能只是待开票列表里显示「暂无患者」, 或者按钮直接消失。
+    """
+
+    def _blocks(self, *texts):
+        return [ocr_mod.TextBlock(t, 100, 100, 80, 22, 0.9) for t in texts]
+
+    def test_matches_the_dialog_phrasing(self):
+        got = bridge.pick_empty(self._blocks("暂无可开发票"),
+                               ["暂无可开发票", "暂无患者"])
+        self.assertEqual(got, "暂无可开发票")
+
+    def test_matches_the_list_phrasing(self):
+        got = bridge.pick_empty(self._blocks("暂无患者"),
+                               ["暂无可开发票", "暂无患者"])
+        self.assertEqual(got, "暂无患者")
+
+    def test_returns_empty_when_nothing_matches(self):
+        self.assertEqual(bridge.pick_empty(self._blocks("门诊收费", "待开票"), ["暂无"]), "")
+
+    def test_tolerates_no_needles(self):
+        self.assertEqual(bridge.pick_empty(self._blocks("暂无患者"), []), "")
+
+
 if __name__ == "__main__":
     unittest.main()

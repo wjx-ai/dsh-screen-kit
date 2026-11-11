@@ -234,6 +234,9 @@ def cmd_click_text(args):
     click_at(best["x"], best["y"], args.get("button", "left"), int(args.get("clicks", 1)))
     for h in solid:
         h["nx"], h["ny"] = normalize(h["x"], h["y"])
+    # relook() 返回的是 locate() 新建的字典, 不在 solid 里, 上面那个循环碰不到它,
+    # 所以这里单独算: 否则点完会在返回值上抛 KeyError (按钮其实已经点出去了)。
+    best["nx"], best["ny"] = normalize(best["x"], best["y"])
     others = [{"text": h["text"], "nx": h["nx"], "ny": h["ny"], "block": h["block"]}
               for h in solid[1:]]
     return {"ok": True, "clicked": [best["x"], best["y"]],
@@ -313,6 +316,22 @@ def relook(region: str, needle: str, expected: dict,
     return best, ""
 
 
+def pick_empty(blocks, needles) -> str:
+    """在已经识别好的文字块里, 找出第一个"没得开"的标志。
+
+    同一个系统的"没得开"可能有几种长相, 例如 ABC数字医疗云 既有
+    「暂无可开发票」的提示框, 待开票列表空的时候又会显示「暂无患者」。
+    调用方传一串候选, 这里按顺序返回先撞到的那个。
+    """
+    for needle in needles or []:
+        if not needle:
+            continue
+        if any(not h.fuzzy for h in ocr_mod.search_blocks(blocks, needle,
+                                                          exact=True)):
+            return needle
+    return ""
+
+
 def cmd_batch(args):
     """连续点击同一套按钮多次。
 
@@ -333,6 +352,17 @@ def cmd_batch(args):
     times = int(args.get("times", 20))
     interval = float(args.get("interval", 2.0))
     empty_text = args.get("empty_text", "")
+    # 同一个系统"没得开"可能有几种不同的长相, 所以允许传一串:
+    #   ABC数字医疗云就同时存在「暂无可开发票」提示框 和 待开票列表里显示「暂无患者」
+    # 一次截图把所有候选都查一遍, 不重复 OCR。
+    empty_texts = ([empty_text] if isinstance(empty_text, str)
+                   else [t for t in (empty_text or []) if t])
+    empty_texts = [t for t in empty_texts if t]
+    empty_desc = " / ".join(repr(t) for t in empty_texts) if empty_texts else "''"
+    # 有些系统"没得开"不是弹一个提示框, 而是按钮直接消失 (ABC数字医疗云就是这样:
+    # 队列空了, 工具栏上的「开票」整个不见, 只留下状态标签)。
+    # 打开这个开关, 工具栏上找不到 top_text 就当作 empty_text 一样处理。
+    absent_means_empty = bool(args.get("absent_means_empty", False))
     wait_limit = float(args.get("wait_limit", 10.0))
     dry_run = bool(args.get("dry_run", False))
     log_lines: list[str] = []
@@ -346,10 +376,12 @@ def cmd_batch(args):
         solid = [h for h in hits if not h["fuzzy"]]
         return solid[0] if solid else None
 
-    def screen_has(needle: str) -> bool:
-        image, _ox, _oy = grab("")
-        return any(not h.fuzzy for h in ocr_mod.search_blocks(
-            ocr_mod.ocr(image), needle, exact=True))
+    def which_empty() -> str:
+        """返回屏幕上先撞到的那个"没得开"标志, 都没撞到就返回空串。"""
+        if not empty_texts:
+            return ""
+        image, _ox, _oy = grab("")          # 整屏只截一次、只识别一次
+        return pick_empty(ocr_mod.ocr(image), empty_texts)
 
     def wait_for(region: str, needle: str, present: bool, limit: float):
         deadline = time.time() + limit
@@ -379,6 +411,11 @@ def cmd_batch(args):
         candidates = locate(top_text, "", exact=True, max_tier=1)
         top = candidates[0] if candidates else None
     if top is None:
+        if absent_means_empty:
+            return {"ok": True, "done": 0,
+                    "stopped": (f"工具栏上没有 {top_text!r} —— 队列已空 "
+                                f"(absent_means_empty 已开启, 视同 {empty_text!r})"),
+                    "log": log_lines}
         return {"ok": False, "done": 0,
                 "stopped": f"找不到起始按钮 {top_text!r}", "log": log_lines}
     note(f"起始按钮 {top_text!r} @pixel({top['x']},{top['y']})")
@@ -401,16 +438,24 @@ def cmd_batch(args):
         # 工具栏这一下: 点之前重新认一遍, 认不出「开票」就不点。
         fresh, why = relook(top_region, top_text, top) if top_region else (top, "")
         if fresh is None:
-            stopped = f"拒绝点击工具栏 ({top['x']},{top['y']}): {why}"
-            note(f"[{i}] {stopped}")
+            # 注意: 走到这里说明上一张已经开完 (本轮还没点任何东西),
+            # 按钮消失很可能就是队列空了, 而不是出了错。
+            if absent_means_empty:
+                stopped = (f"工具栏上已经没有 {top_text!r} 了 —— 队列已空 "
+                           f"(视同 {empty_text!r})")
+                note(f"[{i}] {stopped}")
+            else:
+                stopped = f"拒绝点击工具栏 ({top['x']},{top['y']}): {why}"
+                note(f"[{i}] {stopped}")
             break
         top = fresh
         click_at(top["x"], top["y"])
 
         hit = wait_for(popup_region, popup_text, True, wait_limit) if popup_region else None
         if hit is None:
-            if empty_text and screen_has(empty_text):
-                stopped = f"出现 {empty_text!r} —— 没有可点的了"
+            seen_empty = which_empty()
+            if seen_empty:
+                stopped = f"出现 {seen_empty!r} —— 没有可点的了"
                 note(f"[{i}] {stopped}")
                 press_esc()          # 别把这种提示框留在用户屏幕上
                 break
@@ -421,8 +466,9 @@ def cmd_batch(args):
                 click_at(top["x"], top["y"])
                 hit = wait_for(popup_region, popup_text, True, wait_limit)
             if hit is None:
-                if empty_text and screen_has(empty_text):
-                    stopped = f"出现 {empty_text!r} —— 没有可点的了"
+                seen_empty = which_empty()
+                if seen_empty:
+                    stopped = f"出现 {seen_empty!r} —— 没有可点的了"
                 else:
                     stopped = f"点了 {top_text!r} 但 {popup_text!r} 一直没出现"
                 note(f"[{i}] {stopped}")

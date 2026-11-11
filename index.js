@@ -391,9 +391,20 @@ export async function apply(ctx) {
           times: { type: 'number', description: 'Max rounds (default 20).' },
           interval: { type: 'number', description: 'Seconds between clicks (default 2).' },
           empty_text: {
-            type: 'string',
+            type: ['string', 'array'],
+            items: { type: 'string' },
             description:
-              'When this text shows up, stop and report it - e.g. "暂无可开发票" means the queue is empty.',
+              'When this text shows up, stop and report it - e.g. "暂无可开发票" means the queue is empty. ' +
+              'Pass an array to cover several phrasings at once (one screenshot is checked against all of ' +
+              'them, so it costs nothing extra): the same system often says "暂无可开发票" in a dialog but ' +
+              '"暂无患者" in the list when nothing is left.',
+          },
+          absent_means_empty: {
+            type: 'boolean',
+            description:
+              'Treat a vanished `top_text` button as "queue empty" instead of as an error. ' +
+              'Some systems show no dialog when there is nothing left to click - they just ' +
+              'remove the button. Costs nothing to enable when the two cases coincide.',
           },
           wait_limit: { type: 'number', description: 'Max seconds to wait for the dialog (default 10).' },
           dry_run: {
