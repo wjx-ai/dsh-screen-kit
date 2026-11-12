@@ -525,7 +525,115 @@ def cmd_batch(args):
     return {"ok": True, "done": done, "stopped": stopped or "结束", "log": log_lines}
 
 
+def cmd_calibrate(args):
+    """现场探出开票要用的两个区域, 不用人手填坐标。
+
+    换一台电脑, 分辨率和缩放都不一样, 手填的像素区域 100% 失效 ——
+    这是"新机器上根本跑不起来"的头号原因。这个命令现场做一遍:
+    点开工具栏按钮 -> 找弹窗按钮 -> 按 Esc 取消, 然后算出两块区域。
+
+    关键: 校准不真的开票。找到弹窗按钮之后立刻按 Esc 取消, 并回报是否取消成功。
+    """
+    top_text = args.get("top_text") or "开票"
+    popup_text = args.get("popup_text") or top_text
+    wait_limit = float(args.get("wait_limit", 30.0))
+    empty_texts = args.get("empty_text") or ["暂无可开发票", "暂无患者"]
+    if isinstance(empty_texts, str):
+        empty_texts = [empty_texts]
+
+    be = backend()
+    bx, by, sw, sh = be.screen_bounds()
+
+    for _ in range(3):                      # 起点要干净: 上一轮可能留着弹窗
+        press_esc()
+        time.sleep(0.5)
+
+    def box(hit, left_pad, right_pad, up_pad, down_pad):
+        x1 = max(bx, hit["x"] - hit["w"] // 2 - left_pad)
+        y1 = max(by, hit["y"] - hit["h"] // 2 - up_pad)
+        x2 = min(bx + sw, hit["x"] + hit["w"] // 2 + right_pad)
+        y2 = min(by + sh, hit["y"] + hit["h"] // 2 + down_pad)
+        region = ",".join(str(round(v)) for v in (
+            (x1 - bx) / sw * 1000, (y1 - by) / sh * 1000,
+            (x2 - bx) / sw * 1000, (y2 - by) / sh * 1000))
+        return region
+
+    # 工具栏按钮的横坐标会被前面的金额文字推着走 (￥0.00 和 ￥1199.88 差 300 多像素),
+    # 所以左边要留很宽 —— 与其精确, 不如整条带都覆盖。
+    tops = locate(top_text, "", exact=True, max_tier=0)
+    if not tops:
+        seen = pick_empty(ocr_mod.ocr(grab("")[0]), empty_texts)
+        if seen:
+            return {"ok": True, "calibrated": False,
+                    "reason": f"屏幕上写着 {seen!r} —— 现在没有可开的单据, 等有单据再校准",
+                    "hint": "区域本身没变, 只是现在没东西可开"}
+        return {"ok": False,
+                "error": f"屏幕上找不到 {top_text!r}",
+                "hint": "确认业务系统停在能开票的页面; 或者用 top_text 指定按钮文字"}
+    top = tops[0]
+
+    click_at(top["x"], top["y"])
+
+    bottom_half = "0,450,1000,1000"         # 弹窗按钮只在下半屏; 限定区域也避开工具栏同名按钮
+    popup = None
+    deadline = time.time() + wait_limit
+    while time.time() < deadline:
+        found = [h for h in locate(popup_text, bottom_half, exact=True, max_tier=1)
+                 if not h["fuzzy"]]
+        if found:
+            popup = found[0]
+            break
+        time.sleep(0.4)
+
+    if popup is None:
+        seen = pick_empty(ocr_mod.ocr(grab("")[0]), empty_texts)
+        press_esc()
+        if seen:
+            return {"ok": True, "calibrated": False,
+                    "reason": f"点了 {top_text!r} 之后出现 {seen!r} —— 现在没有可开的单据"}
+        return {"ok": False,
+                "error": f"点了 {top_text!r} 之后 {popup_text!r} 没在下面出现",
+                "top_button": {"x": top["x"], "y": top["y"], "block": top["block"]}}
+
+    press_esc()                              # 校准不该真的留下一张票
+    time.sleep(0.8)
+    left_open = [h for h in locate(popup_text, bottom_half, exact=True, max_tier=1)
+                 if not h["fuzzy"]]
+
+    # 右边一律留到屏幕边缘: 金额文字变宽会把整组按钮往右推, 右边卡死就会漏掉。
+    top_region = box(top, left_pad=600, right_pad=420, up_pad=45, down_pad=45)
+    popup_region = box(popup, left_pad=320, right_pad=240, up_pad=80, down_pad=100)
+
+    batch_args = {
+        "top_text": top_text,
+        "popup_text": popup_text,
+        "top_region": top_region,
+        "popup_region": popup_region,
+        "times": args.get("times", 1000),
+        "interval": args.get("interval", 2.0),
+        "empty_text": empty_texts,
+        "absent_means_empty": True,
+        "wait_limit": args.get("batch_wait_limit", 45.0),
+    }
+    return {
+        "ok": True,
+        "calibrated": True,
+        "screen": {"width": sw, "height": sh},
+        "top_button": {"text": top_text, "x": top["x"], "y": top["y"],
+                       "block": top["block"]},
+        "popup_button": {"text": popup_text, "x": popup["x"], "y": popup["y"],
+                         "block": popup["block"]},
+        "top_region": top_region,
+        "popup_region": popup_region,
+        "popup_cancelled": not left_open,
+        "batch_args": batch_args,
+        "next": ("用 batch_args 调 screen_batch_click 就能开票; "
+                 "校准本身按了 Esc, 没有开出票"),
+    }
+
+
 COMMANDS = {
+    "calibrate": cmd_calibrate,
     "info": cmd_info,
     "read": cmd_read,
     "find": cmd_find,

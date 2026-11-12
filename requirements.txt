@@ -1,0 +1,12 @@
+# dsh-screen-kit 的 Python 依赖
+#
+#   pip install -r requirements.txt
+#
+# rapidocr_onnxruntime 自带中文模型, 纯 pip, 不需要另外下模型文件。
+# 它比 rapidocr 快, 也是我实测一直在用的那个。
+Pillow>=9.0
+rapidocr_onnxruntime>=1.3
+
+# Linux 上如果没有 X11 的库, 截图还可能退回到这些工具 (可选, 不是 pip 包):
+#   Debian/Ubuntu: sudo apt install scrot imagemagick
+#   或者装 mss: pip install mss

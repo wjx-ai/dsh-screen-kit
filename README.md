@@ -43,15 +43,55 @@ DSH 本身没有"手"。接一个 MCP 也能有，但那条路上每一步都要
 
 ## 安装
 
+### 换一台电脑，三步就能开票
+
+克隆下来**不需要你记任何坐标**——仓库自带开票脚本，区域现场算：
+
+```bash
+git clone https://github.com/wjx-ai/dsh-screen-kit
+cd dsh-screen-kit
+pip install -r requirements.txt
+
+python invoice.py --dry-run     # 第 1 步：校准，只报区域，不开票
+python invoice.py               # 第 2 步：校准 + 开票，一直开到最后一张
+```
+
+`invoice.py` 现场做三件事：找到工具栏按钮 → 点开它 → 等弹窗按钮出现，
+然后**按 Esc 取消**并把两块区域算出来。所以 `--dry-run` 不会开出发票。
+
+**为什么必须现场算：** 区域是绝对像素。换台电脑，分辨率、缩放比例、
+窗口位置全都不一样，写死的坐标一定失效——这是"抄参数抄不过去"的根本原因。
+
+**不装 DSH 也能直接用** `invoice.py`：它只调 Python 引擎，和插件注册无关。
+
+具体到某个业务系统怎么跑、为什么会停、停了查什么，
+见配方文档 **[recipes/abc-invoice.md](recipes/abc-invoice.md)**——
+那是按真实生产环境跑出来的，不是猜的。
+
+换一个业务系统就自定义：
+
+```bash
+python invoice.py --top-text 开票 --popup-text 确定 \
+                  --empty-text "暂无数据" --empty-text "暂无可开发票"
+```
+
+`--empty-text` 是"没得开了"的信号，可以给多个——见 [停止条件](#停止条件)。
+
 ### 1. Python 依赖
 
 ```bash
-pip install rapidocr_onnxruntime Pillow numpy     # OCR 必需（自带中文模型）
-pip install mss                                   # Linux 截图推荐
-pip install pyobjc-framework-Quartz               # macOS 输入必需
+pip install -r requirements.txt                   # OCR 必需（自带中文模型）
 ```
 
-Windows 不需要额外系统包（全走 ctypes）。
+等价的完整清单，按平台：
+
+| 平台 | 需要装什么 |
+|---|---|
+| Windows | `Pillow` `rapidocr_onnxruntime`（全走 ctypes，无系统包）|
+| macOS | 上面两个 + `pyobjc-framework-Quartz`（输入和窗口列表用）|
+| Linux | 上面两个 + `mss`（截图）；认真用还得装 X11 库，见平台那一节 |
+
+Windows 不需要额外系统包。
 
 ### 2. 挂进 DSH
 
