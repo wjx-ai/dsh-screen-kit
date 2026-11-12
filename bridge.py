@@ -84,6 +84,22 @@ def normalize(x: int, y: int):
     return round(x / width * 1000), round(y / height * 1000)
 
 
+def region_around(x: int, y: int, half_w: int, half_h: int) -> str:
+    """以 (x, y) 为中心取一块归一化区域。
+
+    用途: 复检时只重看目标附近这一小条, 而不是整块区域 —— OCR 的时间跟面积走,
+    整块 1820x117 要 2.3 秒, 窄带 840x120 只要 1 秒左右。
+    """
+    bx, by, width, height = backend().screen_bounds()
+    x1 = max(bx, int(x) - half_w)
+    y1 = max(by, int(y) - half_h)
+    x2 = min(bx + width, int(x) + half_w)
+    y2 = min(by + height, int(y) + half_h)
+    return ",".join(str(round(v)) for v in (
+        (x1 - bx) / width * 1000, (y1 - by) / height * 1000,
+        (x2 - bx) / width * 1000, (y2 - by) / height * 1000))
+
+
 # ---- 动作 ----------------------------------------------------------------
 
 def click_at(x: int, y: int, button: str = "left", clicks: int = 1) -> None:
@@ -287,7 +303,8 @@ def cmd_windows(args):
 
 
 def relook(region: str, needle: str, expected: dict,
-           tolerance: int = 40) -> tuple[dict | None, str]:
+           tolerance: int = 40, narrow: tuple[int, int] = (0, 0)
+           ) -> tuple[dict | None, str]:
     """按下鼠标之前, 用同一套识别再看一眼: 还在、而且还在原地, 才允许点。
 
     为什么需要: 从"认出按钮"到"按下鼠标"之间有一段间隔 —— 批处理里是 1.5 秒。
@@ -300,8 +317,16 @@ def relook(region: str, needle: str, expected: dict,
 
     返回 (可点的最新位置 or None, 拒绝的原因)。
     """
-    hits = locate(needle, region, exact=True, max_tier=1)
-    solid = [h for h in hits if not h["fuzzy"]]
+    # 先只看上次位置附近的一条窄带 (快), 窄带里没有才退回整块区域 (稳)。
+    # 顺序不能反: 反了就永远付整块的钱。
+    first = region
+    if narrow != (0, 0) and expected:
+        first = region_around(expected["x"], expected["y"], narrow[0], narrow[1])
+    solid = [h for h in locate(needle, first, exact=True, max_tier=1)
+             if not h["fuzzy"]]
+    if not solid and first != region:
+        solid = [h for h in locate(needle, region, exact=True, max_tier=1)
+                 if not h["fuzzy"]]
     if not solid:
         # 拒绝时把那一带实际写着什么报出来, 让人一眼看出发生了什么
         blocks = ocr_mod.ocr(grab(region)[0])
@@ -365,6 +390,7 @@ def cmd_batch(args):
     absent_means_empty = bool(args.get("absent_means_empty", False))
     wait_limit = float(args.get("wait_limit", 10.0))
     dry_run = bool(args.get("dry_run", False))
+    timing = bool(args.get("timing", False))
     log_lines: list[str] = []
 
     def note(msg: str) -> None:
@@ -391,7 +417,9 @@ def cmd_batch(args):
                 return hit
             if not present and not hit:
                 return True
-            time.sleep(0.3)
+            # 轮询间隔。一次 find_in 本身要 0.7 秒, 这里的 sleep 只是补缝,
+            # 0.3 会让每次轮询多等三成时间; 0.12 足够让界面有机会更新。
+            time.sleep(0.12)
         return None if present else False
 
     # ---- 干净起步: 上一轮可能留着弹窗 ----
@@ -436,7 +464,8 @@ def cmd_batch(args):
     for i in range(1, times + 1):
         t0 = time.time()
         # 工具栏这一下: 点之前重新认一遍, 认不出「开票」就不点。
-        fresh, why = relook(top_region, top_text, top) if top_region else (top, "")
+        fresh, why = (relook(top_region, top_text, top, narrow=(420, 60))
+                      if top_region else (top, ""))
         if fresh is None and absent_means_empty:
             # 按钮消失有两种可能: 真的开完了 / 列表正在刷新, 工具栏短暂空白。
             # 后者在 ABC数字医疗云 上真实发生过: 抢在空白那一瞬间宣布"队列已空",
@@ -463,8 +492,10 @@ def cmd_batch(args):
             break
         top = fresh
         click_at(top["x"], top["y"])
+        t_top = time.time()          # 定位并点完工具栏按钮
 
         hit = wait_for(popup_region, popup_text, True, wait_limit) if popup_region else None
+        t_pop = time.time()          # 弹窗按钮出现
         if hit is None:
             seen_empty = which_empty()
             if seen_empty:
@@ -488,10 +519,12 @@ def cmd_batch(args):
                 press_esc()
                 break
 
+        t_pop_hit = time.time()
         time.sleep(max(0.0, interval - 0.5))
         # 关键一下: 隔了 interval 秒, 那个坐标上早就未必还是「开票」了。
         # 开票成功后同一位置会变成「红冲」—— 盲点就是一次冲销操作。
-        fresh, why = relook(popup_region, popup_text, hit) if popup_region else (hit, "")
+        fresh, why = (relook(popup_region, popup_text, hit, narrow=(300, 90))
+                      if popup_region else (hit, ""))
         if fresh is None:
             stopped = f"拒绝点击 ({hit['x']},{hit['y']}): {why}"
             note(f"[{i}] {stopped}")
@@ -499,6 +532,7 @@ def cmd_batch(args):
             break
         hit = fresh
         click_at(hit["x"], hit["y"])
+        t_click = time.time()        # 按下弹窗按钮
 
         if popup_region and not wait_for(popup_region, popup_text, False, 6.0):
             again = find_in(popup_region, popup_text)
@@ -512,8 +546,14 @@ def cmd_batch(args):
             break
 
         done += 1
+        t_end = time.time()
+        detail = ""
+        if timing:
+            # 分阶段看时间花在哪: 业务系统慢 还是 插件慢, 一眼分清
+            detail = (f"  [定位{t_top - t0:.1f} 等弹窗{t_pop - t_top:.1f} "
+                      f"复检{t_click - t_pop_hit:.1f} 等关闭{t_end - t_click:.1f}]")
         note(f"[{i}] 完成 上({top['x']},{top['y']}) 下({hit['x']},{hit['y']}) "
-             f"{time.time() - t0:.1f}s")
+             f"{t_end - t0:.1f}s{detail}")
         if done % 10 == 0 and top_region:
             refresh = find_in(top_region, top_text)
             if refresh:

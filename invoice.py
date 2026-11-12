@@ -38,14 +38,20 @@ def main() -> int:
     parser.add_argument("--empty-text", action="append", default=None,
                         help="看到这个就说明没得开了, 可重复; "
                              "默认 暂无可开发票 + 暂无患者")
-    parser.add_argument("--interval", type=float, default=2.0,
-                        help="每张之间停几秒 (默认 2)")
+    parser.add_argument("--interval", type=float, default=1.0,
+                        help="每张之间额外停几秒 (默认 1; 复检本身已经自带停顿)")
+    parser.add_argument("--fast", action="store_true",
+                        help="最快节奏 (等价于 --interval 0.2); "
+                             "实测安全, 但机器很慢时可以调回 1")
     parser.add_argument("--limit", type=int, default=1000,
                         help="最多开几张 (默认 1000)")
     parser.add_argument("--wait-limit", type=float, default=45.0,
                         help="等弹窗出现最多几秒 (默认 45; 电子票据联网取数据会慢)")
     parser.add_argument("--dry-run", action="store_true",
                         help="只校准并报告区域, 不开票")
+    parser.add_argument("--timing", action="store_true",
+                        help="每张后面打印分阶段耗时 (定位/等弹窗/复检/等关闭), "
+                             "用来分清是业务系统慢还是插件慢")
     parser.add_argument("--json", action="store_true",
                         help="只输出 JSON (给程序用)")
     args = parser.parse_args()
@@ -73,8 +79,9 @@ def main() -> int:
 
     batch_args = dict(calibration["batch_args"])
     batch_args["times"] = args.limit
-    batch_args["interval"] = args.interval
+    batch_args["interval"] = 0.2 if args.fast else args.interval
     batch_args["wait_limit"] = args.wait_limit
+    batch_args["timing"] = args.timing
 
     result = bridge.cmd_batch(batch_args)
     summary = {"done": result.get("done"), "stopped": result.get("stopped")}
