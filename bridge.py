@@ -593,7 +593,12 @@ def cmd_calibrate(args):
                     "reason": f"点了 {top_text!r} 之后出现 {seen!r} —— 现在没有可开的单据"}
         return {"ok": False,
                 "error": f"点了 {top_text!r} 之后 {popup_text!r} 没在下面出现",
-                "top_button": {"x": top["x"], "y": top["y"], "block": top["block"]}}
+                "top_button": {"x": top["x"], "y": top["y"], "block": top["block"]},
+                "screen": {"width": sw, "height": sh},
+                "hint": ("两个最常见的原因: "
+                         "1) 业务窗口太窄 —— 工具栏会折行, 按钮被挤到别的行, "
+                         "点下去可能什么也不发生, 先把窗口拉宽或最大化再校准; "
+                         "2) 这个按钮点了不会弹窗 (记录状态不允许开票, 比如已退费)。")}
 
     press_esc()                              # 校准不该真的留下一张票
     time.sleep(0.8)
