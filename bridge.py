@@ -503,12 +503,19 @@ def cmd_batch(args):
                 note(f"[{i}] {stopped}")
                 press_esc()          # 别把这种提示框留在用户屏幕上
                 break
-            # 点可能被吞了 (上一张还在处理), 重新定位再点一次
-            retry = find_in(top_region, top_text) if top_region else None
-            if retry:
-                top = retry
-                click_at(top["x"], top["y"])
-                hit = wait_for(popup_region, popup_text, True, wait_limit)
+            # 点可能被吞了 (上一张还在处理), 但先确认弹窗是不是其实已经开了:
+            # 如果弹窗开着还去点工具栏, 那一下会落在弹窗上, 可能点到别的按钮。
+            # (真发生过: 一张票的弹窗慢了 45 秒才被认到, 差点走这条路。)
+            opened = find_in(popup_region, popup_text) if popup_region else None
+            if opened is not None:
+                hit = opened        # 已经在眼前了, 不需要再点工具栏
+            else:
+                again_top, _why = (relook(top_region, top_text, top, narrow=(420, 60))
+                                   if top_region else (top, ""))
+                if again_top is not None:
+                    top = again_top
+                    click_at(top["x"], top["y"])
+                    hit = wait_for(popup_region, popup_text, True, wait_limit)
             if hit is None:
                 seen_empty = which_empty()
                 if seen_empty:
