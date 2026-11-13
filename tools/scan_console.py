@@ -121,10 +121,19 @@ def bring_console_front() -> None:
         pass
 
 
+_last_scan = {'text': '', 'at': 0.0}
+
+
 def _submit(text: str) -> None:
     text = text.strip()
     if not text:
         return
+    now = time.time()
+    # 手抖连扫两次: 3 秒内同样的内容直接吃掉, 连提示都不用给
+    if text == _last_scan['text'] and now - _last_scan['at'] < 3.0:
+        return
+    _last_scan['text'] = text
+    _last_scan['at'] = now
     pending = _scan_queue.qsize()
     _scan_queue.put(text)
     if pending:

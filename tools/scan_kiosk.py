@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import json
 import os
 import re
 import subprocess
@@ -225,6 +226,58 @@ def resolve_url(scanned: str, wait_limit: float = 60.0, log=print):
     return None, '页面里没有发票下载地址（可能还没开票，或网络有问题）'
 
 
+# ---- 防重复打印 --------------------------------------------------------
+#
+# 患者很容易把同一张二维码扫两次 (手抖、以为没扫上)。不拦就会打两张,
+# 既费纸又像机器出故障。策略:
+#   1. 同一串扫码内容 3 秒内重复 -> 静默忽略 (在 scan_console 里做)
+#   2. 同一张发票在窗口期内已打过 -> 明确提示, 不再打
+#
+# 记录落盘, 这样程序重启后仍然记得 (用过关掉再开重复打的情况)。
+
+PRINT_STATE = os.path.expandvars(r'%LOCALAPPDATA%\dsh-screen-kit\printed_invoices.json')
+DUPLICATE_WINDOW_MIN = 30
+
+
+def _load_printed() -> dict:
+    try:
+        with open(PRINT_STATE, encoding='utf-8') as fh:
+            data = json.load(fh)
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    return {}
+
+
+def _save_printed(data: dict) -> None:
+    try:
+        os.makedirs(os.path.dirname(PRINT_STATE), exist_ok=True)
+        cutoff = time.time() - 24 * 3600          # 只留一天, 文件不会越滚越大
+        data = {k: v for k, v in data.items() if isinstance(v, (int, float)) and v > cutoff}
+        with open(PRINT_STATE, 'w', encoding='utf-8') as fh:
+            json.dump(data, fh)
+    except Exception:
+        pass
+
+
+def already_printed(invoice_id: str):
+    """这张打过吗? 返回 (是否打过, 上次时间文字)。"""
+    data = _load_printed()
+    ts = data.get(invoice_id)
+    if not isinstance(ts, (int, float)):
+        return False, ''
+    if time.time() - ts > DUPLICATE_WINDOW_MIN * 60:
+        return False, ''
+    return True, time.strftime('%H:%M', time.localtime(ts))
+
+
+def mark_printed(invoice_id: str) -> None:
+    data = _load_printed()
+    data[invoice_id] = time.time()
+    _save_printed(data)
+
+
 def do_print(url: str, printer: str, dry_run: bool, log=print) -> bool:
     dest = os.path.join(os.environ.get('TEMP', '.'), 'kiosk_invoice.pdf')
     try:
@@ -249,7 +302,17 @@ def run_once(scanned: str, printer: str, dry_run: bool, log=print) -> bool:
         log(f'⚠ {reason}' if reason else '⚠ 没拿到发票地址')
         return False
     log(f'发票地址: {url}')
-    return do_print(url, printer, dry_run, log=log)
+    invoice_id = url.rsplit('/', 1)[-1]
+    dup, when = already_printed(invoice_id)
+    if dup:
+        log(f'  上次打印时间: {when}')
+        log(f'这张发票 {when} 已经打印过一张了。'
+            '如果确实需要再打一张，请联系收费处。')
+        return False
+    ok = do_print(url, printer, dry_run, log=log)
+    if ok and not dry_run:
+        mark_printed(invoice_id)
+    return ok
 
 
 def gui(printer: str, dry_run: bool) -> int:
