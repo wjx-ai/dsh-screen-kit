@@ -261,6 +261,46 @@ def _save_printed(data: dict) -> None:
         pass
 
 
+SCAN_CACHE = os.path.expandvars(r'%LOCALAPPDATA%\dsh-screen-kit\scan_cache.json')
+
+
+def _read_json(path: str) -> dict:
+    try:
+        with open(path, encoding='utf-8') as fh:
+            data = json.load(fh)
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    return {}
+
+
+def _write_json(path: str, data: dict) -> None:
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        cutoff = time.time() - 7 * 24 * 3600
+        data = {k: v for k, v in data.items()
+                if isinstance(v, dict) and v.get('at', 0) > cutoff}
+        with open(path, 'w', encoding='utf-8') as fh:
+            json.dump(data, fh, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+def cached_id(scanned: str) -> str:
+    """扫过的那串内容上次对应的发票 id (有就省掉十几秒解析)。"""
+    entry = _read_json(SCAN_CACHE).get(scanned.strip())
+    if isinstance(entry, dict):
+        return str(entry.get('id') or '')
+    return ''
+
+
+def remember_id(scanned: str, invoice_id: str) -> None:
+    data = _read_json(SCAN_CACHE)
+    data[scanned.strip()] = {'id': invoice_id, 'at': time.time()}
+    _write_json(SCAN_CACHE, data)
+
+
 def already_printed(invoice_id: str):
     """这张打过吗? 返回 (是否打过, 上次时间文字)。"""
     data = _load_printed()
@@ -278,6 +318,92 @@ def mark_printed(invoice_id: str) -> None:
     _save_printed(data)
 
 
+def printer_job_count(printer: str) -> int:
+    """打印机队列里还剩几个任务; 出错返回 -1。"""
+    winspool = ctypes.WinDLL('winspool.drv', use_last_error=True)
+    winspool.OpenPrinterW.restype = wt_bool = ctypes.c_int
+    handle = ctypes.c_void_p()
+    if not winspool.OpenPrinterW(ctypes.c_wchar_p(printer), ctypes.byref(handle), None):
+        return -1
+    try:
+        needed = ctypes.c_ulong(0)
+        returned = ctypes.c_ulong(0)
+        # 级别 1 拿 JOB_INFO_1, 只要数量所以先探大小
+        winspool.EnumJobsW(handle, 0, 99, 1, None, 0,
+                           ctypes.byref(needed), ctypes.byref(returned))
+        if needed.value:
+            buf = ctypes.create_string_buffer(needed.value)
+            if winspool.EnumJobsW(handle, 0, 99, 1, buf, needed.value,
+                                  ctypes.byref(needed), ctypes.byref(returned)):
+                return int(returned.value)
+            return -1
+        return 0
+    finally:
+        winspool.ClosePrinter(handle)
+
+
+def printer_is_printing(printer: str) -> bool:
+    """打印机是不是还在动 (PRINTER_STATUS_PRINTING = 0x400)。"""
+    winspool = ctypes.WinDLL('winspool.drv', use_last_error=True)
+
+    class PRINTER_INFO_2(ctypes.Structure):
+        _fields_ = [('pServerName', ctypes.c_wchar_p),
+                    ('pPrinterName', ctypes.c_wchar_p),
+                    ('pShareName', ctypes.c_wchar_p),
+                    ('pPortName', ctypes.c_wchar_p),
+                    ('pDriverName', ctypes.c_wchar_p),
+                    ('pComment', ctypes.c_wchar_p),
+                    ('pLocation', ctypes.c_wchar_p),
+                    ('pDevMode', ctypes.c_void_p),
+                    ('pSepFile', ctypes.c_wchar_p),
+                    ('pPrintProcessor', ctypes.c_wchar_p),
+                    ('pDatatype', ctypes.c_wchar_p),
+                    ('pParameters', ctypes.c_wchar_p),
+                    ('pSecurityDescriptor', ctypes.c_void_p),
+                    ('Attributes', ctypes.c_ulong),
+                    ('Priority', ctypes.c_ulong),
+                    ('DefaultPriority', ctypes.c_ulong),
+                    ('StartTime', ctypes.c_ulong),
+                    ('UntilTime', ctypes.c_ulong),
+                    ('Status', ctypes.c_ulong)]
+
+    handle = ctypes.c_void_p()
+    if not winspool.OpenPrinterW(ctypes.c_wchar_p(printer), ctypes.byref(handle), None):
+        return False
+    try:
+        needed = ctypes.c_ulong(0)
+        winspool.GetPrinterW(handle, 2, None, 0, ctypes.byref(needed))
+        if not needed.value:
+            return False
+        buf = ctypes.create_string_buffer(needed.value)
+        if not winspool.GetPrinterW(handle, 2, buf, needed.value, ctypes.byref(needed)):
+            return False
+        info = ctypes.cast(buf, ctypes.POINTER(PRINTER_INFO_2)).contents
+        return bool(info.Status & 0x00000400)
+    finally:
+        winspool.ClosePrinter(handle)
+
+
+def wait_for_printer(printer: str, timeout: float = 120.0, log=print) -> bool:
+    """等到打印机队列清空并且不再打印, 才算真的出纸了。
+
+    为什么必须等: 把任务交给驱动只是一瞬间的事, 后面还要排队、取纸、出纸。
+    提前告诉患者"请取走发票", 人会伸手去掏一张还没出来的纸。
+    """
+    start = time.time()
+    while time.time() - start < timeout:
+        jobs = printer_job_count(printer)
+        printing = printer_is_printing(printer)
+        if jobs == 0 and not printing:
+            return True
+        if jobs < 0:
+            log('  读不到打印队列, 按已完成处理')
+            return True
+        time.sleep(0.5)
+    log('  等待打印机超时 (%d 秒), 可能卡纸或缺纸' % int(timeout))
+    return False
+
+
 def do_print(url: str, printer: str, dry_run: bool, log=print) -> bool:
     dest = os.path.join(os.environ.get('TEMP', '.'), 'kiosk_invoice.pdf')
     try:
@@ -289,30 +415,58 @@ def do_print(url: str, printer: str, dry_run: bool, log=print) -> bool:
     log(f'  {size // 1024} KB, {len(sizes)} 页')
     try:
         log('  ' + print_pdf(dest, printer, dry_run))
-        return True
     except Exception as exc:
         log(f'  打印失败: {exc}')
         return False
+    if dry_run:
+        return True
+    return wait_for_printer(printer, log=log)
 
 
-def run_once(scanned: str, printer: str, dry_run: bool, log=print) -> bool:
+def run_once(scanned: str, printer: str, dry_run: bool, log=print,
+             on_phase=None) -> bool:
+    """处理一次扫码。on_phase('resolve'|'print') 用来切界面上的文案。"""
+    def phase(name: str) -> None:
+        if on_phase:
+            try:
+                on_phase(name)
+            except Exception:
+                pass
+
     log(f'收到: {scanned[:70]}')
-    url, reason = resolve_url(scanned, log=log)
-    if not url:
-        log(f'⚠ {reason}' if reason else '⚠ 没拿到发票地址')
-        return False
-    log(f'发票地址: {url}')
+
+    # 老票重扫: 缓存里有 id, 立刻就能判重, 不用再花十几秒去解析
+    known = cached_id(scanned)
+    if known:
+        dup, when = already_printed(known)
+        if dup:
+            log(f'这张发票 {when} 已经打印过一张了。'
+                '如果确实需要再打一张，请联系收费处。')
+            return False
+        url = 'http://einvoice.jsczt.cn/d/' + known
+        log(f'发票地址（缓存）: {url}')
+    else:
+        phase('resolve')
+        url, reason = resolve_url(scanned, log=log)
+        if not url:
+            log(f'⚠ {reason}' if reason else '⚠ 没拿到发票地址')
+            return False
+        log(f'发票地址: {url}')
+        remember_id(scanned, url.rsplit('/', 1)[-1])
+
     invoice_id = url.rsplit('/', 1)[-1]
     dup, when = already_printed(invoice_id)
     if dup:
-        log(f'  上次打印时间: {when}')
         log(f'这张发票 {when} 已经打印过一张了。'
             '如果确实需要再打一张，请联系收费处。')
         return False
+
+    phase('print')
     ok = do_print(url, printer, dry_run, log=log)
     if ok and not dry_run:
         mark_printed(invoice_id)
     return ok
+
 
 
 def gui(printer: str, dry_run: bool) -> int:
