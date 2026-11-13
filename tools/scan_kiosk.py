@@ -30,7 +30,7 @@ sys.path.insert(0, HERE)
 
 import bridge  # noqa: E402
 from print_invoice import DEFAULT_PRINTER, download, page_sizes, print_pdf  # noqa: E402
-from read_invoice_url import find_chrome_window, read_invoice_url  # noqa: E402
+from read_invoice_url import find_chrome_window, read_invoice_url, read_page  # noqa: E402
 
 CHROME = r'C:\Users\Administrator\AppData\Local\Google\Chrome\Application\chrome.exe'
 WM_CLOSE = 0x0010
@@ -123,44 +123,88 @@ def close_window(handle: int) -> None:
         pass
 
 
-def resolve_url(scanned: str, wait_limit: float = 30.0, log=print) -> str | None:
-    """把扫码得到的东西变成发票 PDF 地址。"""
+# 页面上出现这些字样, 说明票还没开 / 开不出来, 不要傻等
+NOT_INVOICED = ('未开票', '待开票', '未开具', '暂无', '未找到', '不存在', '已作废', '已红冲')
+
+
+def resolve_url(scanned: str, wait_limit: float = 24.0, log=print):
+    """把扫码得到的东西变成发票 PDF 地址。
+
+    返回 (地址 or None, 原因文字)。原因要能直接给人看:
+    自助机前面站着患者, 不能只丢一句"失败"。
+    """
     cannonical = normalize_scan(scanned)
     if not cannonical:
         log(f'  认不出这是什么: {scanned[:60]}')
-        return None
+        return None, '扫码内容认不出来'
     if cannonical != scanned.strip():
         log(f'  已整理为: {cannonical}')
     scanned = cannonical
     if 'einvoice.jsczt.cn/d/' in scanned:
-        return scanned
+        return scanned, ''
 
     log('  打开页面 ...')
     before = {int(w.handle) for w in bridge.backend().windows()}
     subprocess.Popen([CHROME, '--new-window', scanned], close_fds=True)
 
-    deadline = time.time() + wait_limit
+    start = time.time()
+    deadline = start + wait_limit
     url = None
+
+    def fresh_candidates():
+        """本次新开的浏览器窗口, 非最小化的排前面。
+
+        不能用 find_chrome_window() 直接取第一个: 用户自己开着的发票窗口,
+        或者上一次没关掉的残留窗口, 都会排在前面 —— 结果 OCR 读的是旧页面,
+        一直等到超时。这个坑真踩过。
+        """
+        out = []
+        for w in bridge.backend().windows():
+            d = w.as_dict()
+            if int(d['handle']) in before:
+                continue
+            t = (d.get('title') or '')
+            if ('view-invoice' in t or '查看发票' in t
+                    or 'abcyun' in t or '发票' in t):
+                out.append(d)
+        out.sort(key=lambda d: d['rect'][0] <= -30000)
+        return out
+
     while time.time() < deadline:
         time.sleep(1.5)
-        win = find_chrome_window()
-        if not win or win['handle'] in before:
+        cands = fresh_candidates()
+        if not cands:
             continue
+        win = cands[0]
         # 把浏览器顶到前台再 OCR —— 自助机窗口是 topmost, 不这么做会读到自己的字
         try:
             bridge.backend().focus(win['handle'])
             time.sleep(0.4)
         except Exception:
             pass
-        url = read_invoice_url(win)
+        url, page_text = read_page(win)
         if url:
             close_window(win['handle'])
-            return url
+            return url, ''
+        # 页面上已经有内容但没有下载地址 —— 多半是票还没开, 不必再等
+        flat = page_text.replace(' ', '')
+        if flat:
+            for word in NOT_INVOICED:
+                if word in flat:
+                    close_window(win['handle'])
+                    log(f'  页面提示: {word}')
+                    return None, f'这张票现在不能打印（页面显示「{word}」）'
+            # 必须等到「发票下载」这一块渲染出来, 才能断定确实没有地址。
+            # 只看抬头就下结论会误判: 页面是分步渲染的, 抬头先出来,
+            # 下载地址晚一两帧 (实测因此把已开票的单错判成未开票)。
+            if ('发票下载' in flat and 'einvoice' not in flat
+                    and time.time() - start > 5.0):
+                close_window(win['handle'])
+                return None, '页面上没有发票下载地址 —— 这张票可能还没开'
     log('  等了 %.0f 秒没读到发票地址' % wait_limit)
-    win = find_chrome_window()
-    if win and win['handle'] not in before:
-        close_window(win['handle'])
-    return None
+    for d in fresh_candidates():          # 收尾: 把本次开的窗口都关掉, 不留残页
+        close_window(d['handle'])
+    return None, '页面一直没出现发票地址（网络或系统可能有问题）'
 
 
 def do_print(url: str, printer: str, dry_run: bool, log=print) -> bool:
@@ -182,9 +226,9 @@ def do_print(url: str, printer: str, dry_run: bool, log=print) -> bool:
 
 def run_once(scanned: str, printer: str, dry_run: bool, log=print) -> bool:
     log(f'收到: {scanned[:70]}')
-    url = resolve_url(scanned, log=log)
+    url, reason = resolve_url(scanned, log=log)
     if not url:
-        log('失败: 没拿到发票地址')
+        log(f'⚠ {reason}' if reason else '⚠ 没拿到发票地址')
         return False
     log(f'发票地址: {url}')
     return do_print(url, printer, dry_run, log=log)
