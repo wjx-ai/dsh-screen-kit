@@ -90,10 +90,26 @@ def main() -> int:
 
     bring_console_front()
 
+    def banner(text: str) -> None:
+        print()
+        print('=' * 60)
+        print('  ' + text)
+        print('=' * 60)
+
     def work(scanned: str) -> None:
         print()
-        ok = run_once(scanned, printer, False)
-        print('✅ 打印完成' if ok else '❌ 失败')
+        buf = []
+
+        def collect(msg: str) -> None:
+            buf.append(msg)
+
+        ok = run_once(scanned, printer, False, log=collect)
+        if not ok:
+            # 失败原因要让人一眼看到: 站在机器前面的患者或收费员
+            last = buf[-1] if buf else '打印失败'
+            banner(last.lstrip('⚠ '))
+        else:
+            banner('✅ 打印完成，请取走发票')
         print()
         print('请扫下一张 ＞ ', end='', flush=True)
         bring_console_front()
