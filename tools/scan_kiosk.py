@@ -78,23 +78,41 @@ def force_foreground(root) -> None:
     """
     try:
         user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
         hwnd = int(root.winfo_id())
         GA_ROOT = 2
         root_hwnd = user32.GetAncestor(hwnd, GA_ROOT)
         fg = user32.GetForegroundWindow()
-        if fg != root_hwnd:
-            cur = ctypes.windll.kernel32.GetCurrentThreadId()
-            fg_thread = user32.GetWindowThreadProcessId(fg, None)
-            attached = False
-            if fg_thread and fg_thread != cur:
-                attached = bool(user32.AttachThreadInput(fg_thread, cur, True))
-            user32.BringWindowToTop(root_hwnd)
-            user32.SetForegroundWindow(root_hwnd)
-            user32.SetFocus(root_hwnd)
-            if attached:
-                user32.AttachThreadInput(fg_thread, cur, False)
-    except Exception:
-        pass
+        if fg == root_hwnd:
+            return
+        cur = kernel32.GetCurrentThreadId()
+        fg_thread = user32.GetWindowThreadProcessId(fg, None)
+        attached = False
+        if fg_thread and fg_thread != cur:
+            attached = bool(user32.AttachThreadInput(fg_thread, cur, True))
+        user32.BringWindowToTop(root_hwnd)
+        ok = bool(user32.SetForegroundWindow(root_hwnd))
+        # 注意: 这里绝对不能调 SetFocus(root_hwnd) —— 那会把 Tk 的内部输入焦点
+        # 从 Entry 抢到窗口本身, 于是扫码枪的字符进不了输入框,
+        # 用户必须点一下鼠标才恢复。这个坑真踩过。
+        if attached:
+            user32.AttachThreadInput(fg_thread, cur, False)
+        after = user32.GetForegroundWindow()
+        try:
+            import time as _t
+            with open(os.path.join(os.environ.get('TEMP', '.'), 'focus.log'), 'a',
+                      encoding='utf-8') as fh:
+                fh.write('%s root=%s fg_before=%s ok=%s fg_after=%s attached=%s\n' % (
+                    _t.strftime('%H:%M:%S'), root_hwnd, fg, ok, after, attached))
+        except Exception:
+            pass
+    except Exception as exc:
+        try:
+            with open(os.path.join(os.environ.get('TEMP', '.'), 'focus.log'), 'a',
+                      encoding='utf-8') as fh:
+                fh.write('ERROR %s\n' % exc)
+        except Exception:
+            pass
 
 
 def close_window(handle: int) -> None:
@@ -266,6 +284,12 @@ def gui(printer: str, dry_run: bool) -> int:
     def keep_front():
         if not busy['flag']:
             force_foreground(root)
+            # 抢完前台把输入焦点还给输入框, 否则字符进不来
+            try:
+                if root.focus_get() is not entry:
+                    entry.focus_set()
+            except Exception:
+                pass
         root.after(2500, keep_front)
 
     root.after(300, keep_front)
