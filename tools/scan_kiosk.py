@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -35,6 +36,67 @@ CHROME = r'C:\Users\Administrator\AppData\Local\Google\Chrome\Application\chrome
 WM_CLOSE = 0x0010
 
 
+CODE_RE = re.compile(r'/s/([A-Za-z0-9]+)')
+INVOICE_ID_RE = re.compile(r'/d/([0-9A-Za-z]+)')
+HEX_ONLY = re.compile(r'[0-9a-f]')
+CONFUSE = str.maketrans({'O': '0', 'o': '0', 'l': '1', 'I': '1', 'i': '1',
+                         '|': '1', 'S': '5', 's': '5', 'B': '8', 'G': '6',
+                         'Z': '2', 'z': '2', 'T': '7', 'Q': '0', 'D': '0'})
+
+
+def normalize_scan(text: str) -> str | None:
+    """把扫码枪读到的内容整理成能用的地址。
+
+    实测扫码枪会把域名里的点吃掉: https://abcyuncn/s/5i5jr6d
+    (不是 OCR 认错, 是输入本身少了那个点)。
+    所以不信任域名: 只取末尾的短码, 自己拼回正确地址。
+    """
+    text = (text or '').strip()
+    if not text:
+        return None
+
+    m = CODE_RE.search(text)
+    if m:
+        return 'https://abcyun.cn/s/' + m.group(1)
+
+    m = INVOICE_ID_RE.search(text)
+    if m:
+        hex_id = ''.join(HEX_ONLY.findall(m.group(1).translate(CONFUSE).lower()))
+        if len(hex_id) >= 15:
+            return 'http://einvoice.jsczt.cn/d/' + hex_id
+
+    if text.startswith('http'):
+        return text
+    return None
+
+
+def force_foreground(root) -> None:
+    """把这个窗口顶到系统最前面。
+
+    只调 Tk 的 focus_force 不够: 扫码枪是键盘输入, 字符进的是
+    *系统当前活动窗口*。窗口不在前台时, 扫出来的字全跑到别的程序里了。
+    """
+    try:
+        user32 = ctypes.windll.user32
+        hwnd = int(root.winfo_id())
+        GA_ROOT = 2
+        root_hwnd = user32.GetAncestor(hwnd, GA_ROOT)
+        fg = user32.GetForegroundWindow()
+        if fg != root_hwnd:
+            cur = ctypes.windll.kernel32.GetCurrentThreadId()
+            fg_thread = user32.GetWindowThreadProcessId(fg, None)
+            attached = False
+            if fg_thread and fg_thread != cur:
+                attached = bool(user32.AttachThreadInput(fg_thread, cur, True))
+            user32.BringWindowToTop(root_hwnd)
+            user32.SetForegroundWindow(root_hwnd)
+            user32.SetFocus(root_hwnd)
+            if attached:
+                user32.AttachThreadInput(fg_thread, cur, False)
+    except Exception:
+        pass
+
+
 def close_window(handle: int) -> None:
     """关掉我们开的那个浏览器窗口, 不留残页。"""
     try:
@@ -45,12 +107,15 @@ def close_window(handle: int) -> None:
 
 def resolve_url(scanned: str, wait_limit: float = 30.0, log=print) -> str | None:
     """把扫码得到的东西变成发票 PDF 地址。"""
-    scanned = scanned.strip()
+    cannonical = normalize_scan(scanned)
+    if not cannonical:
+        log(f'  认不出这是什么: {scanned[:60]}')
+        return None
+    if cannonical != scanned.strip():
+        log(f'  已整理为: {cannonical}')
+    scanned = cannonical
     if 'einvoice.jsczt.cn/d/' in scanned:
         return scanned
-    if not scanned.startswith('http'):
-        log(f'  不是网址: {scanned[:60]}')
-        return None
 
     log('  打开页面 ...')
     before = {int(w.handle) for w in bridge.backend().windows()}
@@ -63,6 +128,12 @@ def resolve_url(scanned: str, wait_limit: float = 30.0, log=print) -> str | None
         win = find_chrome_window()
         if not win or win['handle'] in before:
             continue
+        # 把浏览器顶到前台再 OCR —— 自助机窗口是 topmost, 不这么做会读到自己的字
+        try:
+            bridge.backend().focus(win['handle'])
+            time.sleep(0.4)
+        except Exception:
+            pass
         url = read_invoice_url(win)
         if url:
             close_window(win['handle'])
@@ -133,13 +204,30 @@ def gui(printer: str, dry_run: bool) -> int:
     busy = {'flag': False}
 
     def worker(scanned: str) -> None:
-        ok = run_once(scanned, printer, dry_run, log=log)
+        # 处理期间必须让开: 自助机窗口是 topmost, 会盖住浏览器页面上
+        # 显示发票地址的那一块, OCR 读到的全是自己的字 (真踩过)
+        try:
+            root.attributes('-topmost', False)
+            root.withdraw()
+        except Exception:
+            pass
+        try:
+            ok = run_once(scanned, printer, dry_run, log=log)
+        finally:
+            try:
+                root.deiconify()
+                root.attributes('-topmost', True)
+            except Exception:
+                pass
         log('✅ 打印完成' if ok else '❌ 失败')
         log('')
         busy['flag'] = False
         entry.configure(state='normal')
         entry.delete(0, 'end')
+        entry.focus_force()
         entry.focus_set()
+        force_foreground(root)
+        last_text['value'] = ''
 
     def on_scan(_event=None):
         if busy['flag']:
@@ -152,8 +240,35 @@ def gui(printer: str, dry_run: bool) -> int:
         threading.Thread(target=worker, args=(scanned,), daemon=True).start()
         return 'break'
 
+    # 扫码枪常常不发回车 —— 那就靠"输入停顿"自动触发。
+    # 每 300ms 看一眼输入框, 内容非空且 0.8 秒没变化, 就当成扫完了。
+    last_text = {'value': '', 'changed_at': 0.0}
+
+    def watch_input():
+        try:
+            now = time.time()
+            current = entry.get().strip()
+            if current != last_text['value']:
+                last_text['value'] = current
+                last_text['changed_at'] = now
+            elif (current and not busy['flag']
+                  and now - last_text['changed_at'] > 0.8):
+                on_scan()
+        except Exception:
+            pass
+        root.after(300, watch_input)
+
     entry.bind('<Return>', on_scan)
     root.bind('<Escape>', lambda _e: root.destroy())
+    root.after(300, watch_input)
+
+    # 抢前台: 扫码枪的字符进的是系统活动窗口, 窗口不在前台就全丢别处了
+    def keep_front():
+        if not busy['flag']:
+            force_foreground(root)
+        root.after(2500, keep_front)
+
+    root.after(300, keep_front)
     if dry_run:
         log('*** dry-run: 不会真的打印 ***')
     log('就绪。扫码枪扫一下即可，按 Esc 退出。')

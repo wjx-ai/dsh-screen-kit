@@ -34,7 +34,8 @@ def find_chrome_window() -> dict | None:
     """找标题里带 view-invoice / 查看发票 的浏览器窗口。"""
     for win in bridge.backend().windows():
         title = win.title or ''
-        if 'view-invoice' in title or '查看发票' in title:
+        if ('view-invoice' in title or '查看发票' in title
+                or 'abcyun.cn' in title or 'abcyun' in title):
             return win.as_dict()
     return None
 
