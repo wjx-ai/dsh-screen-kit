@@ -1,10 +1,11 @@
 """发票自助打印 (控制台版) —— 扫码就出纸。
 
-设计要点:
-  1. 收票和处理分开两个线程 —— 打印一张要十几秒, 这期间必须能继续收下一张。
-     否则第二张扫码的字堆在控制台缓冲区里, 处理完一次读进来, 两张粘成一串。
-  2. 界面只给患者看: 大字号, 一句话, 处理时有转动的省略号。
-     技术细节 (停顿触发、Esc) 不上屏。
+界面规则:
+  * 屏幕上永远只有两三行, 大字号
+  * 队列里有几张, 并到"正在打印..."那一行里, 不额外刷屏
+  * 全部打完就清屏, 只留下"请扫描发票上的二维码"
+    —— 上一个人看到的提示, 对下一个人是噪音
+  * 失败信息多留一会儿 (要能读完), 成功留短一点
 """
 from __future__ import annotations
 
@@ -25,10 +26,14 @@ from scan_kiosk import DEFAULT_PRINTER, run_once  # noqa: E402
 FONT_SIZE = 20
 TITLE = '发票自助打印  (关闭本窗口即退出)'
 PROMPT = '请扫描发票上的二维码'
+KEEP_OK = 4.0        # 成功提示停留几秒后清屏
+KEEP_FAIL = 12.0     # 失败提示要让人读完, 留久一点
 
 _scan_queue: queue.Queue = queue.Queue()
 _stop = threading.Event()
 _lock = threading.Lock()
+_last_scan = {'text': '', 'at': 0.0}
+_clear_gen = [0]                 # 清屏的"代号", 来了新票就作废上一次的清屏
 
 
 def setup_console() -> None:
@@ -70,20 +75,46 @@ def setup_console() -> None:
         pass
 
 
+def clear_screen() -> None:
+    with _lock:
+        os.system('cls')
+        sys.stdout.write('\n  ' + PROMPT + '\n\n')
+        sys.stdout.flush()
+
+
+def schedule_clear(delay: float) -> None:
+    """延时清屏; 期间来了新票就作废。"""
+    _clear_gen[0] += 1
+    gen = _clear_gen[0]
+
+    def run() -> None:
+        time.sleep(delay)
+        if _clear_gen[0] != gen or not _scan_queue.empty():
+            return
+        clear_screen()
+
+    threading.Thread(target=run, daemon=True).start()
+
+
 class Spinner:
-    """转动的省略号: 处理时有动静, 人不至于以为机器死了。"""
+    """转动的省略号; 排队张数并在这同一行里, 不另起一行刷屏。"""
 
     def __init__(self, text: str = '正在打印'):
         self.text = text
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
 
+    def _line(self, i: int) -> str:
+        dots = ['.', '..', '...'][i % 3]
+        pending = _scan_queue.qsize()
+        tail = '   (还有 %d 张)' % pending if pending else ''
+        return '\r  ' + self.text + dots + '        ' + tail
+
     def _run(self) -> None:
-        frames = ['.', '..', '...']
         i = 0
         while not self._stop.is_set():
             with _lock:
-                sys.stdout.write('\r  ' + self.text + frames[i % 3] + '    ')
+                sys.stdout.write(self._line(i) + '    ')
                 sys.stdout.flush()
             i += 1
             self._stop.wait(0.45)
@@ -95,7 +126,7 @@ class Spinner:
         self._stop.set()
         self._thread.join(timeout=2)
         with _lock:
-            sys.stdout.write('\r' + ' ' * 40 + '\r')
+            sys.stdout.write('\r' + ' ' * 60 + '\r')
             sys.stdout.flush()
 
 
@@ -121,34 +152,20 @@ def bring_console_front() -> None:
         pass
 
 
-_last_scan = {'text': '', 'at': 0.0}
-
-
 def _submit(text: str) -> None:
     text = text.strip()
     if not text:
         return
     now = time.time()
-    # 手抖连扫两次: 3 秒内同样的内容直接吃掉, 连提示都不用给
     if text == _last_scan['text'] and now - _last_scan['at'] < 3.0:
-        return
+        return                        # 手抖连扫, 直接吃掉
     _last_scan['text'] = text
     _last_scan['at'] = now
-    pending = _scan_queue.qsize()
+    _clear_gen[0] += 1                # 有新票: 取消之前排队的清屏
     _scan_queue.put(text)
-    if pending:
-        with _lock:
-            # 先把自己那行擦掉, 否则会和转动的省略号抢同一行, 糊成一团
-            sys.stdout.write('\r' + ' ' * 44 + '\r')
-            sys.stdout.write('  已收到，前面还有 %d 张，请稍候\n' % pending)
-            sys.stdout.flush()
 
 
 def reader(idle: float = 0.8) -> None:
-    """只管收: 每收到一段就塞进队列, 立刻回去继续收。
-
-    这样打印一张的十几秒里, 后面扫的票都会被排队, 不会丢也不会粘连。
-    """
     buf = ''
     last = 0.0
     while not _stop.is_set():
@@ -178,7 +195,6 @@ def reader(idle: float = 0.8) -> None:
 
 
 def worker(printer: str) -> None:
-    """只管处理: 从队列取一张, 打完再取下一张。"""
     while not _stop.is_set():
         item = _scan_queue.get()
         if item is None:
@@ -193,9 +209,8 @@ def worker(printer: str) -> None:
         ok = False
         try:
             ok = run_once(item, printer, False, log=collect)
-        except Exception as exc:
+        except Exception:
             buf.append('打印失败，请联系工作人员')
-            collect('')
         finally:
             spinner.stop()
 
@@ -209,22 +224,21 @@ def worker(printer: str) -> None:
                     if line.strip():
                         print('  ' + line.strip())
             print()
-            print('  ' + PROMPT)
-            print()
             sys.stdout.flush()
-        if _scan_queue.qsize() == 0:
+
+        if _scan_queue.empty():
+            # 队列空了: 过一会儿清屏, 只留提示。
+            # 成功留短一点, 失败留久一点 —— 读不完的提示等于没提示。
+            schedule_clear(KEEP_OK if ok else KEEP_FAIL)
             bring_console_front()
 
 
 def main() -> int:
     setup_console()
-    with _lock:
-        sys.stdout.write('\n  ' + PROMPT + '\n\n')
-        sys.stdout.flush()
+    clear_screen()
 
     threading.Thread(target=reader, daemon=True).start()
-    worker_thread = threading.Thread(target=worker, args=(DEFAULT_PRINTER,), daemon=True)
-    worker_thread.start()
+    threading.Thread(target=worker, args=(DEFAULT_PRINTER,), daemon=True).start()
 
     try:
         while not _stop.is_set():
