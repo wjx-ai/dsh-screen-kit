@@ -158,6 +158,71 @@ python invoice.py                # 开票，一直开到最后一张
 第 2、3 步任一不满足，先把界面弄回去，再 `python invoice.py`。
 ---
 
+## 打印：电子发票 → A5 纸
+
+### 二维码地址不能直接当 PDF 用
+
+扫码枪扫出来的 `https://abcyun.cn/s/xxxx` 返回的是 **HTML（前端 JS 应用，约 39 KB）**，
+不是 PDF。真正跳到发票的那一步是在 JS 里做的，所以抓这个地址拿不到发票。
+
+但 `http://einvoice.jsczt.cn/d/<id>` **直接返回 `application/pdf`**——
+只要知道 id，下载打印完全不依赖浏览器。
+
+### 页面尺寸不是 A5（这是坑的根源）
+
+实测这张发票 PDF 共 3 页，页面尺寸分别是：
+
+```
+190 × 127 mm
+190 × 281 mm
+190 × 127 mm
+A5 标准是 148 × 210 mm
+```
+
+**190 mm 宽塞进 148 mm 的纸里，必须缩到约 78%。**
+
+### 别用 Foxit：它不听纸张设置
+
+实测两次，结论明确：
+
+| 做法 | 结果 |
+|---|---|
+| 打印机默认纸张设 A5 + `Foxit /t` | **无效**。打出来仍是 A4 排版，A5 纸两边被裁掉 |
+| `SumatraPDF -print-settings "paper=A5,fit"` | **正确**，A5 出纸内容完整 |
+
+Foxit 的 `/t` 用的是它自己记住的纸张（A4），会把打印机默认值覆盖掉。
+**只有把纸张和缩放写进打印任务里才可控。**
+
+安装（工具本身不在仓库里，体积大且会更新）：
+
+```bash
+winget install -e --id SumatraPDF.SumatraPDF
+```
+
+### 一条命令
+
+```bash
+python tools/print_invoice.py --once <发票地址>          # 下载并 A5 打印
+python tools/print_invoice.py --once <地址> --dry-run    # 只下载, 不打印
+python tools/print_invoice.py --from-screen              # 从浏览器地址栏 OCR 取地址
+python tools/print_invoice.py                            # 扫码枪逐行扫（读标准输入）
+```
+
+### 一个重要的校验
+
+`download()` 会检查返回内容是不是以 `%PDF` 开头，不是就报错退出。
+
+这不是洁癖：从**地址栏 OCR 出来**的 URL 有识别错的风险
+（`0/O`、`1/l` 这类），打错一张发票比不打印麻烦得多。
+宁可在下载这一步失败，也不要拿一个能打开但内容不对的页面去打印。
+
+### 打印机默认纸张
+
+靠 `-print-settings paper=A5` 按任务指定就够了，**不需要改打印机默认值**。
+（中途改过一次 A5，验证完已经改回 A4，避免影响这台机器上的其他打印。）
+
+---
+
 ## 窗口太窄会折行（实测数据）
 
 把业务窗口拖窄到 **938 像素**时，工具栏会折成两行：
