@@ -19,6 +19,9 @@ import ctypes
 import os
 import re
 import subprocess
+import tempfile
+import urllib.error
+import urllib.request
 import sys
 import threading
 import time
@@ -138,84 +141,88 @@ NOT_INVOICED = {
 }
 
 
-def resolve_url(scanned: str, wait_limit: float = 24.0, log=print):
+INVOICE_URL_RE = re.compile(r'einvoice\.jsczt\.cn/d/([0-9A-Za-z]+)')
+
+
+def _clean_id(raw: str) -> str:
+    return ''.join(HEX_ONLY.findall((raw or '').translate(CONFUSE).lower()))
+
+
+def resolve_short_link(short_url: str, timeout: float = 30.0):
+    """短链是服务端 302, 直接读 Location 就够了, 不需要浏览器。"""
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *a):
+            return None
+
+    opener = urllib.request.build_opener(NoRedirect)
+    req = urllib.request.Request(short_url, headers={'User-Agent': 'Mozilla/5.0'})
+    try:
+        opener.open(req, timeout=timeout)
+        return short_url
+    except urllib.error.HTTPError as exc:
+        return exc.headers.get('Location') or short_url
+    except Exception:
+        return short_url
+
+
+def resolve_headless(target: str, timeout: float = 60.0):
+    """用无头 Chrome 渲染页面, 从导出的 DOM 里找发票地址。
+
+    为什么是无头: 用户不希望打印时有个浏览器弹到前台。
+    为什么以前失败现在能行: 必须给 --timeout。页面里有 socket.io 长连接,
+    不给超时 Chrome 会一直等, 进程永远不退出 (实测卡死 60 秒)。
+    """
+    profile = os.path.join(tempfile.gettempdir(), 'kiosk-chrome-profile')
+    cmd = [CHROME, '--headless=old', '--disable-gpu', '--dump-dom',
+           '--no-first-run', '--no-default-browser-check',
+           '--user-data-dir=' + profile, '--timeout=15000', target]
+    proc = subprocess.run(cmd, capture_output=True, timeout=timeout)
+    dom = proc.stdout.decode('utf-8', 'replace')
+    m = INVOICE_URL_RE.search(dom)
+    if m:
+        hex_id = _clean_id(m.group(1))
+        if len(hex_id) >= 18:
+            return 'http://einvoice.jsczt.cn/d/' + hex_id, dom
+    text = re.sub(r'<[^>]+>', ' ', dom)
+    return None, re.sub(r'\s+', ' ', text)
+
+
+def resolve_url(scanned: str, wait_limit: float = 60.0, log=print):
     """把扫码得到的东西变成发票 PDF 地址。
 
     返回 (地址 or None, 原因文字)。原因要能直接给人看:
-    自助机前面站着患者, 不能只丢一句"失败"。
+    自助机前面站着患者, 不能只丢一句失败。
     """
     cannonical = normalize_scan(scanned)
     if not cannonical:
-        log(f'  认不出这是什么: {scanned[:60]}')
+        log('  认不出这是什么: ' + scanned[:60])
         return None, '扫码内容认不出来'
     if cannonical != scanned.strip():
-        log(f'  已整理为: {cannonical}')
+        log('  已整理为: ' + cannonical)
     scanned = cannonical
     if 'einvoice.jsczt.cn/d/' in scanned:
         return scanned, ''
 
-    log('  打开页面 ...')
-    before = {int(w.handle) for w in bridge.backend().windows()}
-    subprocess.Popen([CHROME, '--new-window', scanned], close_fds=True)
+    target = resolve_short_link(scanned)
+    log('  页面: ' + target[:90])
+    log('  后台解析中 ...')
+    try:
+        url, page = resolve_headless(target, timeout=wait_limit)
+    except subprocess.TimeoutExpired:
+        return None, '解析超时（网络太慢或系统卡住了）'
+    except Exception as exc:
+        log('  解析出错: ' + str(exc))
+        return None, '解析出错，请联系工作人员'
 
-    start = time.time()
-    deadline = start + wait_limit
-    url = None
+    if url:
+        return url, ''
 
-    def fresh_candidates():
-        """本次新开的浏览器窗口, 非最小化的排前面。
-
-        不能用 find_chrome_window() 直接取第一个: 用户自己开着的发票窗口,
-        或者上一次没关掉的残留窗口, 都会排在前面 —— 结果 OCR 读的是旧页面,
-        一直等到超时。这个坑真踩过。
-        """
-        out = []
-        for w in bridge.backend().windows():
-            d = w.as_dict()
-            if int(d['handle']) in before:
-                continue
-            t = (d.get('title') or '')
-            if ('view-invoice' in t or '查看发票' in t
-                    or 'abcyun' in t or '发票' in t):
-                out.append(d)
-        out.sort(key=lambda d: d['rect'][0] <= -30000)
-        return out
-
-    while time.time() < deadline:
-        time.sleep(1.5)
-        cands = fresh_candidates()
-        if not cands:
-            continue
-        win = cands[0]
-        # 把浏览器顶到前台再 OCR —— 自助机窗口是 topmost, 不这么做会读到自己的字
-        try:
-            bridge.backend().focus(win['handle'])
-            time.sleep(0.4)
-        except Exception:
-            pass
-        url, page_text = read_page(win)
-        if url:
-            close_window(win['handle'])
-            return url, ''
-        # 页面上已经有内容但没有下载地址 —— 多半是票还没开, 不必再等
-        flat = page_text.replace(' ', '')
-        if flat:
-            for word, advice in NOT_INVOICED.items():
-                if word in flat:
-                    close_window(win['handle'])
-                    log(f'  页面提示: {word}')
-                    return None, advice
-            # 必须等到「发票下载」这一块渲染出来, 才能断定确实没有地址。
-            # 只看抬头就下结论会误判: 页面是分步渲染的, 抬头先出来,
-            # 下载地址晚一两帧 (实测因此把已开票的单错判成未开票)。
-            if ('发票下载' in flat and 'einvoice' not in flat
-                    and time.time() - start > 5.0):
-                close_window(win['handle'])
-                return None, '页面上没有发票下载地址 —— 这张票可能还没开'
-    log('  等了 %.0f 秒没读到发票地址' % wait_limit)
-    for d in fresh_candidates():          # 收尾: 把本次开的窗口都关掉, 不留残页
-        close_window(d['handle'])
-    return None, '页面一直没出现发票地址（网络或系统可能有问题）'
+    flat = page.replace(' ', '')
+    for word, advice in NOT_INVOICED.items():
+        if word in flat:
+            log('  页面提示: ' + word)
+            return None, advice
+    return None, '页面里没有发票下载地址（可能还没开票，或网络有问题）'
 
 
 def do_print(url: str, printer: str, dry_run: bool, log=print) -> bool:
