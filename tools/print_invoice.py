@@ -17,11 +17,13 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.request
 
 SUMATRA_CANDIDATES = [
@@ -134,6 +136,105 @@ def handle(url: str, printer: str, dry_run: bool) -> bool:
         return False
 
 
+# ---- 盯 Downloads ------------------------------------------------------
+#
+# ABC数字医疗云 开完票会把 PDF 直接下载到 Downloads, 文件名就是发票 id。
+# 所以"扫码 -> 浏览器 -> 抄地址"是绕远路: 文件本来就在本机。
+# 实测文件名形如 4730125ecbb16ca1671.pdf, 和 einvoice.jsczt.cn/d/<id> 的内容一致。
+
+# 发票 id 实测 18~19 位十六进制 (4730125ecbb16ca1671)。
+# 下限取 17 是为了排除 Downloads 里常见的 16 位纯数字临时文件名
+# (实测混进来一个 1217322539213690.pdf), 那种不该被当成发票打出去。
+INVOICE_NAME = re.compile(r"^[0-9a-f]{17,24}\.pdf$", re.I)
+STATE_DIR = os.path.expandvars(r"%LOCALAPPDATA%\dsh-screen-kit")
+STATE_FILE = os.path.join(STATE_DIR, "printed.json")
+
+
+def download_dir() -> str:
+    return os.path.join(os.path.expanduser("~"), "Downloads")
+
+
+def load_state() -> set:
+    try:
+        with open(STATE_FILE, encoding="utf-8") as fh:
+            return set(json.load(fh))
+    except Exception:
+        return set()
+
+
+def save_state(seen: set) -> None:
+    os.makedirs(STATE_DIR, exist_ok=True)
+    with open(STATE_FILE, "w", encoding="utf-8") as fh:
+        json.dump(sorted(seen), fh, ensure_ascii=False, indent=1)
+
+
+def invoice_pdfs(folder: str) -> list:
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return []
+    return sorted(n for n in names if INVOICE_NAME.match(n))
+
+
+def handle_file(path: str, printer: str, dry_run: bool, after: str) -> bool:
+    sizes = page_sizes(path)
+    size_kb = os.path.getsize(path) // 1024
+    print(f"  新发票: {os.path.basename(path)}  {size_kb} KB  {len(sizes)} 页  {sizes}", flush=True)
+    try:
+        how = print_pdf(path, printer, dry_run)
+        print(f"  {how}", flush=True)
+    except Exception as exc:
+        print(f"  打印失败: {exc}", flush=True)
+        return False
+    if after == "move" and not dry_run:
+        done_dir = os.path.join(download_dir(), "_printed")
+        os.makedirs(done_dir, exist_ok=True)
+        try:
+            os.replace(path, os.path.join(done_dir, os.path.basename(path)))
+            print(f"  已移到 _printed/", flush=True)
+        except OSError as exc:
+            print(f"  移动失败: {exc}", flush=True)
+    return True
+
+
+def watch(printer: str, dry_run: bool, interval: float, after: str,
+          print_existing: bool) -> int:
+    folder = download_dir()
+    seen = load_state()
+    current = invoice_pdfs(folder)
+    if not print_existing:
+        # 第一次跑不要把历史文件全打一遍 —— 把现状记下来, 只处理之后新增的
+        new = [n for n in current if n not in seen]
+        if new:
+            print(f"忽略 {len(new)} 个已有文件 (要补打加 --print-existing)", flush=True)
+        seen.update(current)
+        save_state(seen)
+        print(f"盯着 {folder} 等新发票 ... (Ctrl+C 结束)", flush=True)
+    for name in current if print_existing else []:
+        if name in seen and not print_existing:
+            continue
+        path = os.path.join(folder, name)
+        if handle_file(path, printer, dry_run, after):
+            seen.add(name)
+            save_state(seen)
+    try:
+        while True:
+            time.sleep(interval)
+            for name in invoice_pdfs(folder):
+                if name in seen:
+                    continue
+                path = os.path.join(folder, name)
+                time.sleep(0.8)          # 等下载写完, 免得读到半个文件
+                if not os.path.exists(path):
+                    continue
+                if handle_file(path, printer, dry_run, after):
+                    seen.add(name)
+                    save_state(seen)
+    except KeyboardInterrupt:
+        print("\n停止", flush=True)
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="扫发票二维码 -> A5 打印")
     ap.add_argument("--printer", default=DEFAULT_PRINTER)
@@ -141,7 +242,18 @@ def main() -> int:
     ap.add_argument("--once", metavar="URL", help="处理这一个地址")
     ap.add_argument("--from-screen", action="store_true",
                     help="从浏览器地址栏 OCR 取地址 (需要业务机屏幕可见)")
+    ap.add_argument("--watch", action="store_true",
+                    help="盯 Downloads: 一出现新发票 PDF 就打印")
+    ap.add_argument("--interval", type=float, default=1.0, help="轮询间隔秒 (默认 1)")
+    ap.add_argument("--after-print", choices=["keep", "move"], default="keep",
+                    help="打完 keep 保留原文件 / move 移到 Downloads/_printed")
+    ap.add_argument("--print-existing", action="store_true",
+                    help="连已存在的发票一起打 (默认忽略历史, 只打新增)")
     args = ap.parse_args()
+
+    if args.watch:
+        return watch(args.printer, args.dry_run, args.interval,
+                     args.after_print, args.print_existing)
 
     if args.once:
         return 0 if handle(args.once, args.printer, args.dry_run) else 1

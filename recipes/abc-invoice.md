@@ -216,6 +216,46 @@ python tools/print_invoice.py                            # 扫码枪逐行扫（
 （`0/O`、`1/l` 这类），打错一张发票比不打印麻烦得多。
 宁可在下载这一步失败，也不要拿一个能打开但内容不对的页面去打印。
 
+### 打印：盯 Downloads
+
+发票 PDF 会出现在 `~/Downloads`，文件名就是发票 id：
+
+```
+C:\Users\Administrator\Downloads\4730125ecbb16ca1671.pdf   227287 字节
+```
+
+内容和 `http://einvoice.jsczt.cn/d/4730125ecbb16ca1671` 下载的**字节完全一致**。
+
+**这个文件是人工下载的，不是系统自动落的。**
+所以下面这个模式只省掉「打印」那一步，「下载」仍然要人点一下。
+
+```bash
+python tools/print_invoice.py --watch              # 盯着 Downloads, 出现新发票就 A5 打印
+python tools/print_invoice.py --watch --dry-run    # 只看不动纸
+python tools/print_invoice.py --watch --after-print move   # 打完移到 Downloads/_printed
+```
+
+**第一次运行不会把历史文件全打一遍**：它把现有文件登记进
+`%LOCALAPPDATA%\dsh-screen-kit\printed.json`，只处理之后新增的。
+要补打历史文件加 `--print-existing`。
+
+文件名规则是 `^[0-9a-f]{17,24}\.pdf$`，下限 17 是为了排除 Downloads 里
+常见的 16 位纯数字临时文件（实测混进来一个 `1217322539213690.pdf`）——
+**打错一张发票比漏打麻烦得多**，所以宁可规则紧一点。
+
+### 想连下载也省掉：读浏览器地址栏
+
+如果扫码后浏览器会自己跳到 PDF，地址栏里就是最终地址，
+用屏幕 OCR 读出来即可，不用人下载：
+
+```bash
+python tools/print_invoice.py --from-screen          # 读地址栏 -> 下载 -> A5 打印
+python tools/print_invoice.py --from-screen --dry-run
+```
+
+OCR 读 URL 有认错字符的风险（`0/O`、`1/l`），所以下载时强制校验返回值以 `%PDF` 开头，
+不对就停 —— 宁可不打，也不要打错一张。
+
 ### 打印机默认纸张
 
 靠 `-print-settings paper=A5` 按任务指定就够了，**不需要改打印机默认值**。
