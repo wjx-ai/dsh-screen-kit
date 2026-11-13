@@ -1,5 +1,7 @@
 # 跨平台仓库统一用 LF, 避免 Windows 检出时把换行改掉
 * text=auto eol=lf
 *.png binary
-*.jpg binary*.bat text eol=crlf
+*.jpg binary
+# 批处理必须是 CRLF: cmd.exe 读 LF 的 .bat 在跳转/标签上会出错
+*.bat text eol=crlf
 *.cmd text eol=crlf
