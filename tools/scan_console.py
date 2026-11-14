@@ -234,15 +234,23 @@ def reader(idle: float = 0.8) -> None:
 
 
 def countdown(lines_builder, seconds: int = COUNTDOWN) -> bool:
-    """在给定行上倒计时; 来了新票就取消, 返回 False。"""
+    """倒计时, 沙漏翻转 + 沙子进度条。
+
+    每 0.25 秒一帧: 沙漏在 ⏳/⌛ 之间来回翻, 进度条按剩余时间缩短,
+    这样屏幕上一直有东西在动, 人知道机器还在做事。
+    """
     _clear_gen[0] += 1
     gen = _clear_gen[0]
-    for left in range(seconds, 0, -1):
-        SCREEN.draw(lines_builder(left))
-        for _ in range(20):
-            time.sleep(0.05)
-            if _clear_gen[0] != gen or not _scan_queue.empty():
-                return False
+    steps = int(seconds / 0.25)
+    for step in range(steps, 0, -1):
+        left = step * 0.25
+        glyph = '⏳' if int(left * 4) % 2 == 0 else '⌛'
+        remaining = max(1, int(round(left)))     # 别显示 0 秒, 最后一帧就是 1
+        bar = '█' * remaining + '░' * max(0, seconds - remaining)
+        SCREEN.draw(lines_builder('  %s %d 秒后清屏  %s' % (glyph, remaining, bar)))
+        time.sleep(0.25)
+        if _clear_gen[0] != gen or not _scan_queue.empty():
+            return False
     SCREEN.clear_to([PROMPT, ''])
     return True
 
@@ -267,8 +275,7 @@ def worker(printer: str) -> None:
                             '如果确实需要再打一张，请联系收费处。']
 
                 if _scan_queue.empty():
-                    if countdown(lambda left: dup_lines() + ['⏳ %d 秒后清屏' % left],
-                                 COUNTDOWN + 5):
+                    if countdown(lambda cd: dup_lines() + [cd], COUNTDOWN + 5):
                         with _lock:
                             _batch['active'] = False
                             _batch['done'] = 0
@@ -321,8 +328,7 @@ def worker(printer: str) -> None:
             fail_lines = [header()] + ['  ' + ln.strip()
                                        for ln in last.split('\n') if ln.strip()]
             if _scan_queue.empty():
-                if countdown(lambda left: fail_lines + ['⏳ %d 秒后清屏' % left],
-                             COUNTDOWN + 5):
+                if countdown(lambda cd: fail_lines + [cd], COUNTDOWN + 5):
                     with _lock:
                         _batch['active'] = False
                         _batch['done'] = 0
@@ -335,8 +341,8 @@ def worker(printer: str) -> None:
         if _scan_queue.empty():
             summary = '%d 张发票已打印完成，请取走发票' % active_total
 
-            def done_lines(left: int):
-                return [header(), summary, '⏳ %d 秒后清屏' % left]
+            def done_lines(cd: str):
+                return [header(), summary, cd]
 
             if countdown(done_lines, COUNTDOWN):
                 with _lock:
