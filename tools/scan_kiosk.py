@@ -440,8 +440,7 @@ def run_once(scanned: str, printer: str, dry_run: bool, log=print,
     if known:
         dup, when = already_printed(known)
         if dup:
-            log(f'这张发票 {when} 已经打印过一张了。'
-                '如果确实需要再打一张，请联系收费处。')
+            log(f'{when} 已经打印过这张发票了。')
             return False
         url = 'http://einvoice.jsczt.cn/d/' + known
         log(f'发票地址（缓存）: {url}')
@@ -457,8 +456,7 @@ def run_once(scanned: str, printer: str, dry_run: bool, log=print,
     invoice_id = url.rsplit('/', 1)[-1]
     dup, when = already_printed(invoice_id)
     if dup:
-        log(f'这张发票 {when} 已经打印过一张了。'
-            '如果确实需要再打一张，请联系收费处。')
+        log(f'{when} 已经打印过这张发票了。')
         return False
 
     phase('print')

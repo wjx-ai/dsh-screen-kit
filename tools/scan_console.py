@@ -270,9 +270,7 @@ def worker(printer: str) -> None:
             dup, when = sk.already_printed(known)
             if dup:
                 def dup_lines(_left=None):
-                    return [header(),
-                            '这张发票 %s 已经打印过一张了。' % when,
-                            '如果确实需要再打一张，请联系收费处。']
+                    return [header(), '%s 已经打印过这张发票了。' % when]
 
                 if _scan_queue.empty():
                     if countdown(lambda cd: dup_lines() + [cd], COUNTDOWN + 5):
