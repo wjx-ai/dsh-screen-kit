@@ -27,9 +27,9 @@ sys.path.insert(0, HERE)
 import scan_kiosk as sk  # noqa: E402
 from scan_kiosk import DEFAULT_PRINTER, run_once  # noqa: E402
 
-FONT_SIZE = 40
-# 字号 40 之后一行放不下多少字, 缓冲区和窗口都要缩小, 否则超出屏幕
-BUFFER_COLS, BUFFER_ROWS = 44, 16
+FONT_SIZE = 32
+# 字号变大后一行放不下多少字, 缓冲区和窗口跟着调, 否则内容超出窗口
+BUFFER_COLS, BUFFER_ROWS = 50, 18
 TITLE = '发票自助打印  (关闭本窗口即退出)'
 PROMPT = '请扫描收费单上的发票二维码'
 COUNTDOWN = 5
