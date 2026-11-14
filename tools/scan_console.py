@@ -69,9 +69,27 @@ def setup_console() -> None:
         info.cbSize = ctypes.sizeof(CONSOLE_FONT_INFOEX)
         kernel32.GetCurrentConsoleFontEx(handle, False, ctypes.byref(info))
         before = info.dwFontSize.Y
-        info.dwFontSize.X = 0
-        info.dwFontSize.Y = FONT_SIZE
-        ok = kernel32.SetCurrentConsoleFontEx(handle, False, ctypes.byref(info))
+        # 点阵字体 (新宋体/Terminal) 只有固定像素尺寸, 设 40 会被静默忽略 ——
+        # 实测返回成功但字号仍是 16。所以必须换 TrueType 中文字体。
+        candidates = ['Microsoft YaHei', 'SimSun', 'Consolas']
+        ok = False
+        for face in candidates:
+            trial = CONSOLE_FONT_INFOEX()
+            trial.cbSize = ctypes.sizeof(CONSOLE_FONT_INFOEX)
+            kernel32.GetCurrentConsoleFontEx(handle, False, ctypes.byref(trial))
+            trial.FaceName = face
+            trial.FontFamily = 0
+            trial.FontWeight = 400
+            trial.dwFontSize.X = 0
+            trial.dwFontSize.Y = FONT_SIZE
+            res = kernel32.SetCurrentConsoleFontEx(handle, False, ctypes.byref(trial))
+            check = CONSOLE_FONT_INFOEX()
+            check.cbSize = ctypes.sizeof(CONSOLE_FONT_INFOEX)
+            kernel32.GetCurrentConsoleFontEx(handle, False, ctypes.byref(check))
+            ok = bool(res) and check.dwFontSize.Y == FONT_SIZE
+            if ok:
+                break
+
 
         # 诊断: Windows Terminal 托管的控制台不认这套老 API, 字号改不动。
         # 把实际情况写下来, 免得每次都靠猜。
