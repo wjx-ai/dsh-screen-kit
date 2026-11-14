@@ -19,6 +19,7 @@ import ctypes
 import json
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import urllib.error
@@ -166,26 +167,51 @@ def resolve_short_link(short_url: str, timeout: float = 30.0):
         return short_url
 
 
-def resolve_headless(target: str, timeout: float = 60.0):
+def _dump_dom(target: str, chrome_timeout: int, timeout: float) -> str:
+    # 每次都用全新的临时配置目录。
+    # 复用同一个目录会出问题: 实测某个时刻之后它就一直卡在"请稍等"的壳页面,
+    # 换全新目录立刻正常。Chrome 的 profile 状态没人能保证干净, 别指望它。
+    profile = os.path.join(tempfile.gettempdir(),
+                           'kiosk-chrome-%d' % os.getpid())
+    shutil.rmtree(profile, ignore_errors=True)
+    try:
+        cmd = [CHROME, '--headless=old', '--disable-gpu', '--dump-dom',
+               '--no-first-run', '--no-default-browser-check',
+               '--user-data-dir=' + profile,
+               '--timeout=%d' % chrome_timeout, target]
+        proc = subprocess.run(cmd, capture_output=True, timeout=timeout)
+        return proc.stdout.decode('utf-8', 'replace')
+    finally:
+        shutil.rmtree(profile, ignore_errors=True)
+
+
+def resolve_headless(target: str, timeout: float = 90.0, attempts: int = 3):
     """用无头 Chrome 渲染页面, 从导出的 DOM 里找发票地址。
 
     为什么是无头: 用户不希望打印时有个浏览器弹到前台。
-    为什么以前失败现在能行: 必须给 --timeout。页面里有 socket.io 长连接,
-    不给超时 Chrome 会一直等, 进程永远不退出 (实测卡死 60 秒)。
+    为什么必须给 --timeout: 页面里有 socket.io 长连接, 不给超时 Chrome
+    会一直等, 进程永远不退出 (实测卡死 60 秒)。
+
+    为什么要重试: 导出时机不巧会拿到还没渲染完的壳页面
+    (会看到 "doesn't work properly without JavaScript" 和 "请稍等")。
+    那种情况下不能下"没开票"的结论, 必须再导一次。
     """
-    profile = os.path.join(tempfile.gettempdir(), 'kiosk-chrome-profile')
-    cmd = [CHROME, '--headless=old', '--disable-gpu', '--dump-dom',
-           '--no-first-run', '--no-default-browser-check',
-           '--user-data-dir=' + profile, '--timeout=15000', target]
-    proc = subprocess.run(cmd, capture_output=True, timeout=timeout)
-    dom = proc.stdout.decode('utf-8', 'replace')
-    m = INVOICE_URL_RE.search(dom)
-    if m:
-        hex_id = _clean_id(m.group(1))
-        if len(hex_id) >= 18:
-            return 'http://einvoice.jsczt.cn/d/' + hex_id, dom
-    text = re.sub(r'<[^>]+>', ' ', dom)
-    return None, re.sub(r'\s+', ' ', text)
+    last_text = ''
+    for attempt in range(attempts):
+        dom = _dump_dom(target, 20000, timeout)
+        m = INVOICE_URL_RE.search(dom)
+        if m:
+            hex_id = _clean_id(m.group(1))
+            if len(hex_id) >= 18:
+                return 'http://einvoice.jsczt.cn/d/' + hex_id, dom
+        body = re.sub(r'<script[\s\S]*?</script>', ' ', dom)
+        body = re.sub(r'<style[\s\S]*?</style>', ' ', body)
+        text = re.sub(r'<[^>]+>', ' ', body)
+        last_text = re.sub(r'\s+', ' ', text)
+        # 页面真的渲染出来了才会有这些字样; 都没有说明还是壳
+        if '开票状态' in last_text or '医疗电子票据' in last_text:
+            return None, last_text
+    return None, last_text
 
 
 def resolve_url(scanned: str, wait_limit: float = 60.0, log=print):
