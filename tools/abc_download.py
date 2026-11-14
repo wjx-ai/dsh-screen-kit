@@ -20,7 +20,10 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import shutil
+import sqlite3
 import sys
+import tempfile
 import time
 import urllib.request
 
@@ -78,9 +81,58 @@ def download_pdf(invoice_id: str, dest: str | None = None) -> tuple[str, int]:
     return dest, len(data)
 
 
+HISTORY_DB = os.path.expandvars(
+    r'%LOCALAPPDATA%\Google\Chrome\User Data\Default\History')
+
+
+def latest_from_chrome_history(since_seconds: float = 600.0):
+    """从 Chrome 下载历史里取最近一条发票 URL。
+
+    为什么可靠: 下载提示里的文件名是截断的, 而 Chrome 的 downloads 表
+    存着完整 URL (实测一位不差)。只读本地数据库, 不碰网络。
+
+    注意: 只有**下载完成**的记录才会进这个表 —— 卡在"保留"的不算。
+    """
+    if not os.path.exists(HISTORY_DB):
+        return None, '找不到 Chrome 历史数据库'
+    copy = os.path.join(tempfile.gettempdir(), 'chrome_history_copy.db')
+    try:
+        if os.path.exists(copy):
+            os.remove(copy)
+        shutil.copyfile(HISTORY_DB, copy)      # 直接查会被锁, 复制一份
+    except Exception as exc:
+        return None, '复制数据库失败: %s' % exc
+
+    con = sqlite3.connect(copy)
+    try:
+        rows = con.execute(
+            "SELECT d.target_path, d.start_time, u.url "
+            "FROM downloads d JOIN downloads_url_chains u ON u.id = d.id "
+            "WHERE u.chain_index = 0 ORDER BY d.start_time DESC LIMIT 60"
+        ).fetchall()
+    except Exception as exc:
+        con.close()
+        return None, '查询失败: %s' % exc
+    con.close()
+
+    now = time.time()
+    for path, start, url in rows:
+        if 'einvoice.jsczt.cn/d/' not in (url or ''):
+            continue
+        when = (start / 1e6 - 11644473600) if start else 0
+        if when and now - when > since_seconds:
+            continue
+        m = ID_RE.search((url or '').rsplit('/', 1)[-1].lower())
+        if m:
+            return m.group(1), ''
+    return None, '最近没有新的发票下载记录'
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description='从 ABC 取发票并打印')
     ap.add_argument('--current', action='store_true', help='用当前打开的发票预览')
+    ap.add_argument('--from-history', action='store_true',
+                    help='从 Chrome 下载历史里取最近一张发票的完整 id (最可靠)')
     ap.add_argument('--id', help='直接给发票 id')
     ap.add_argument('--print', dest='do_print', action='store_true', help='下载后打印')
     ap.add_argument('--printer', default=P.DEFAULT_PRINTER)
@@ -88,6 +140,12 @@ def main() -> int:
 
     if args.id:
         invoice_id = args.id
+    elif args.from_history:
+        invoice_id, why = latest_from_chrome_history()
+        if not invoice_id:
+            print('失败:', why)
+            return 1
+        print('历史里最新发票 id:', invoice_id)
     elif args.current:
         invoice_id, why = grab_id_from_prompt()
         if not invoice_id:
