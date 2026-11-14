@@ -52,72 +52,61 @@ def setup_console() -> None:
     except Exception:
         pass
 
+    class COORD(ctypes.Structure):
+        _fields_ = [('X', ctypes.c_short), ('Y', ctypes.c_short)]
+
+    class CONSOLE_FONT_INFOEX(ctypes.Structure):
+        _fields_ = [('cbSize', ctypes.c_ulong),
+                    ('nFont', ctypes.c_ulong),
+                    ('dwFontSize', COORD),
+                    ('FontFamily', ctypes.c_uint),
+                    ('FontWeight', ctypes.c_uint),
+                    ('FaceName', ctypes.c_wchar * 32)]
+
+    handle = kernel32.GetStdHandle(-11)
+    notes = []
+
+    # 第一步必须先把窗口/缓冲区缩小。
+    # 否则换成 32px 后, 默认的 120x30 缓冲区会要求一个比屏幕还大的窗口,
+    # Windows 会直接拒绝改字号 —— 实测 SetCurrentConsoleFontEx 返回 0。
     try:
-        class COORD(ctypes.Structure):
-            _fields_ = [('X', ctypes.c_short), ('Y', ctypes.c_short)]
-
-        class CONSOLE_FONT_INFOEX(ctypes.Structure):
-            _fields_ = [('cbSize', ctypes.c_ulong),
-                        ('nFont', ctypes.c_ulong),
-                        ('dwFontSize', COORD),
-                        ('FontFamily', ctypes.c_uint),
-                        ('FontWeight', ctypes.c_uint),
-                        ('FaceName', ctypes.c_wchar * 32)]
-
-        handle = kernel32.GetStdHandle(-11)
-        info = CONSOLE_FONT_INFOEX()
-        info.cbSize = ctypes.sizeof(CONSOLE_FONT_INFOEX)
-        kernel32.GetCurrentConsoleFontEx(handle, False, ctypes.byref(info))
-        before = info.dwFontSize.Y
-        # 点阵字体 (新宋体/Terminal) 只有固定像素尺寸, 设 40 会被静默忽略 ——
-        # 实测返回成功但字号仍是 16。所以必须换 TrueType 中文字体。
-        candidates = ['Microsoft YaHei', 'SimSun', 'Consolas']
-        ok = False
-        for face in candidates:
-            trial = CONSOLE_FONT_INFOEX()
-            trial.cbSize = ctypes.sizeof(CONSOLE_FONT_INFOEX)
-            kernel32.GetCurrentConsoleFontEx(handle, False, ctypes.byref(trial))
-            trial.FaceName = face
-            trial.FontFamily = 0
-            trial.FontWeight = 400
-            trial.dwFontSize.X = 0
-            trial.dwFontSize.Y = FONT_SIZE
-            res = kernel32.SetCurrentConsoleFontEx(handle, False, ctypes.byref(trial))
-            check = CONSOLE_FONT_INFOEX()
-            check.cbSize = ctypes.sizeof(CONSOLE_FONT_INFOEX)
-            kernel32.GetCurrentConsoleFontEx(handle, False, ctypes.byref(check))
-            ok = bool(res) and check.dwFontSize.Y == FONT_SIZE
-            if ok:
-                break
-
-
-        # 诊断: Windows Terminal 托管的控制台不认这套老 API, 字号改不动。
-        # 把实际情况写下来, 免得每次都靠猜。
-        after = CONSOLE_FONT_INFOEX()
-        after.cbSize = ctypes.sizeof(CONSOLE_FONT_INFOEX)
-        kernel32.GetCurrentConsoleFontEx(handle, False, ctypes.byref(after))
-        try:
-            log_path = os.path.join(os.environ.get('TEMP', '.'), 'kiosk_font.log')
-            with open(log_path, 'a', encoding='utf-8') as fh:
-                fh.write('before=%s wanted=%s ok=%s after=%s wt=%s face=%s\n' % (
-                    before, FONT_SIZE, bool(ok), after.dwFontSize.Y,
-                    bool(os.environ.get('WT_SESSION')), after.FaceName))
-        except Exception:
-            pass
-    except Exception:
-        pass
-
-    try:
-        handle = kernel32.GetStdHandle(-11)
-
-        class COORD2(ctypes.Structure):
-            _fields_ = [('X', ctypes.c_short), ('Y', ctypes.c_short)]
-
         ws = wt.SMALL_RECT()
         ws.Left, ws.Top = 0, 0
         ws.Right, ws.Bottom = BUFFER_COLS - 1, BUFFER_ROWS - 1
-        kernel32.SetConsoleScreenBufferSize(handle, COORD2(BUFFER_COLS, BUFFER_ROWS))
         kernel32.SetConsoleWindowInfo(handle, True, ctypes.byref(ws))
+        kernel32.SetConsoleScreenBufferSize(handle, COORD(BUFFER_COLS, BUFFER_ROWS))
+        notes.append('resize=ok')
+    except Exception as exc:
+        notes.append('resize=%s' % exc)
+
+    # 第二步换字号。点阵字体(新宋体)只有固定尺寸, 必须用 TrueType 中文字体。
+    before = 0
+    ok = False
+    face_used = ''
+    for face in ('Microsoft YaHei', 'SimSun', 'Consolas'):
+        trial = CONSOLE_FONT_INFOEX()
+        trial.cbSize = ctypes.sizeof(CONSOLE_FONT_INFOEX)
+        kernel32.GetCurrentConsoleFontEx(handle, False, ctypes.byref(trial))
+        before = trial.dwFontSize.Y
+        trial.FaceName = face
+        trial.dwFontSize.X = 0
+        trial.dwFontSize.Y = FONT_SIZE
+        res = kernel32.SetCurrentConsoleFontEx(handle, False, ctypes.byref(trial))
+        check = CONSOLE_FONT_INFOEX()
+        check.cbSize = ctypes.sizeof(CONSOLE_FONT_INFOEX)
+        kernel32.GetCurrentConsoleFontEx(handle, False, ctypes.byref(check))
+        notes.append('%s:res=%s,size=%s' % (face, bool(res), check.dwFontSize.Y))
+        if res and check.dwFontSize.Y == FONT_SIZE:
+            ok = True
+            face_used = face
+            break
+
+    try:
+        log_path = os.path.join(os.environ.get('TEMP', '.'), 'kiosk_font.log')
+        with open(log_path, 'a', encoding='utf-8') as fh:
+            fh.write('before=%s wanted=%s ok=%s face=%s wt=%s | %s\n' % (
+                before, FONT_SIZE, ok, face_used,
+                bool(os.environ.get('WT_SESSION')), '; '.join(notes)))
     except Exception:
         pass
 

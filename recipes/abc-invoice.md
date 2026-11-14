@@ -312,6 +312,37 @@ OCR 读 URL 有认错字符的风险（`0/O`、`1/l`），所以下载时强制�
 | `abcyun.cn/s/2yHIJ5X` | `.../d/4730125ecbb16ce5f58` | 与 Downloads 里同名文件一致 ✅ |
 | `abcyun.cn/s/lp9WyF0` | `.../d/4730125ecbb16c9c032` | 与 Downloads 里同名文件一致 ✅ |
 
+### 控制台字号：必须走 conhost + TrueType 字体
+
+这里踩了两个坑, 都排查过, 记下来免得重来:
+
+**坑 1: 点阵字体不接受大字号**
+
+原来的 `新宋体` 是点阵字体, 只有固定像素尺寸 (16)。
+`SetCurrentConsoleFontEx(size=40)` **返回成功**, 但字号仍然是 16 —— API 在说谎。
+必须换成 TrueType 中文字体 (`Microsoft YaHei` / `SimSun`)。
+
+**坑 2: Windows Terminal 托管时, 字号 API 完全无效**
+
+Windows 11 默认用 Windows Terminal 托管新开的控制台。
+在这种窗口里, 上面那个 API 一样返回成功, 但字号、字体都不会变。
+判断依据: 从**子进程**里查 `WT_SESSION` 是查不到的, 不能靠环境变量判断。
+可靠的判断方法是看**窗口尺寸有没有跟着字号变**。
+
+**解法: 用 conhost 启动**
+
+`发票自助打印.bat` 现在是这么启动的:
+
+```bat
+start "" conhost.exe cmd.exe /c "chcp 65001 >nul & set PYTHONIOENCODING=utf-8 & python tools/scan_console.py & pause"
+```
+
+走 conhost 后实测: `before=16 wanted=32 ok=True size=32 face=Microsoft YaHei`,
+窗口从 1499x770 (16px) 变成 918x767 (32px)。
+
+代码里现在会**读回实际字号**再判断成功与否, 不信返回值 —— 那个返回值不靠谱。
+诊断信息写在 `%TEMP%/kiosk_font.log`。
+
 ### 打印机默认纸张
 
 靠 `-print-settings paper=A5` 按任务指定就够了，**不需要改打印机默认值**。
