@@ -1,14 +1,17 @@
 """发票自助打印 (控制台版) —— 扫码就出纸。
 
-界面规则 (连扫多张时):
-  正在打印第1张...      -> 换行不换屏, 同一行动态更新
-  正在打印第2张...
-  3张发票已打印完成，请取走发票。
-  （5 秒后自动清空）     -> 倒计时
-  请扫描收费单上的发票二维码
+屏幕版式 (固定三行, 原地刷新, 不刷屏):
 
-  打印期间继续扫码的, 自动排进本批, 编号接着走。
-  队列空 = 本批结束, 报总数并倒计时清屏。
+    一共有 5 张发票
+    正在打印第 2 张发票...
+
+    一共有 5 张发票
+    5 张发票已打印完成，请取走发票
+    ⏳ 4 秒后清屏
+
+    请扫描收费单上的发票二维码
+
+用 VT 转义序列原地重绘, 所以屏幕不会滚动、不会堆积历史信息。
 """
 from __future__ import annotations
 
@@ -28,7 +31,6 @@ import scan_kiosk as sk  # noqa: E402
 from scan_kiosk import DEFAULT_PRINTER, run_once  # noqa: E402
 
 FONT_SIZE = 32
-# 字号变大后一行放不下多少字, 缓冲区和窗口跟着调, 否则内容超出窗口
 BUFFER_COLS, BUFFER_ROWS = 50, 18
 TITLE = '发票自助打印  (关闭本窗口即退出)'
 PROMPT = '请扫描收费单上的发票二维码'
@@ -39,7 +41,19 @@ _stop = threading.Event()
 _lock = threading.Lock()
 _last_scan = {'text': '', 'at': 0.0}
 _clear_gen = [0]
-_batch = {'active': False, 'done': 0}
+_batch = {'active': False, 'done': 0, 'total': 0}
+
+
+def enable_vt() -> None:
+    """打开 VT 转义支持, 否则 \x1b[2K 这些不生效。"""
+    try:
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetStdHandle(-11)
+        mode = ctypes.c_ulong()
+        if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            kernel32.SetConsoleMode(handle, mode.value | 0x0004)
+    except Exception:
+        pass
 
 
 def setup_console() -> None:
@@ -66,9 +80,7 @@ def setup_console() -> None:
     handle = kernel32.GetStdHandle(-11)
     notes = []
 
-    # 第一步必须先把窗口/缓冲区缩小。
-    # 否则换成 32px 后, 默认的 120x30 缓冲区会要求一个比屏幕还大的窗口,
-    # Windows 会直接拒绝改字号 —— 实测 SetCurrentConsoleFontEx 返回 0。
+    # 必须先缩小窗口/缓冲区: 否则 32px 字号会让窗口超出屏幕, Windows 直接拒绝改字号
     try:
         ws = wt.SMALL_RECT()
         ws.Left, ws.Top = 0, 0
@@ -79,7 +91,6 @@ def setup_console() -> None:
     except Exception as exc:
         notes.append('resize=%s' % exc)
 
-    # 第二步换字号。点阵字体(新宋体)只有固定尺寸, 必须用 TrueType 中文字体。
     before = 0
     ok = False
     face_used = ''
@@ -111,59 +122,45 @@ def setup_console() -> None:
         pass
 
 
-def clear_screen() -> None:
-    with _lock:
-        os.system('cls')
-        sys.stdout.write('\n  ' + PROMPT + '\n\n')
-        sys.stdout.flush()
+class Screen:
+    """原地重绘一个文字块, 不滚动、不堆积。"""
 
+    def __init__(self) -> None:
+        self._lines = 0
+        self._text: tuple = ()
 
-def countdown_and_clear(seconds: int = COUNTDOWN) -> bool:
-    """倒计时后清屏。期间来了新票就取消, 返回 False。"""
-    _clear_gen[0] += 1
-    gen = _clear_gen[0]
-    for left in range(seconds, 0, -1):
+    def draw(self, lines) -> None:
+        lines = tuple(lines)
+        if lines == self._text:
+            return
         with _lock:
-            sys.stdout.write('\r  （%d 秒后自动清空）      ' % left)
+            out = ['\r\x1b[2K']
+            for _ in range(self._lines - 1):
+                out.append('\x1b[1A\r\x1b[2K')
+            out.append('\n'.join('  ' + ln for ln in lines))
+            sys.stdout.write(''.join(out))
             sys.stdout.flush()
-        for _ in range(20):                       # 每 50ms 看一次有没有新票
-            time.sleep(0.05)
-            if _clear_gen[0] != gen or not _scan_queue.empty():
-                with _lock:
-                    sys.stdout.write('\r' + ' ' * 30 + '\r')
-                    sys.stdout.flush()
-                return False
-    clear_screen()
-    return True
+            self._lines = len(lines)
+            self._text = lines
 
-
-class Spinner:
-    """转动的省略号, 文案由调用方给 (正在打印第N张)。"""
-
-    def __init__(self, text: str):
-        self.text = text
-        self._stop = threading.Event()
-        self._thread = threading.Thread(target=self._run, daemon=True)
-
-    def _run(self) -> None:
-        i = 0
-        while not self._stop.is_set():
-            dots = ['.', '..', '...'][i % 3]
-            with _lock:
-                sys.stdout.write('\r  ' + self.text + dots + '      ')
-                sys.stdout.flush()
-            i += 1
-            self._stop.wait(0.5)
-
-    def start(self) -> None:
-        self._thread.start()
-
-    def stop(self) -> None:
-        self._stop.set()
-        self._thread.join(timeout=2)
+    def clear_to(self, lines) -> None:
+        """清屏后重新画。"""
         with _lock:
-            sys.stdout.write('\r' + ' ' * 46 + '\r')
+            os.system('cls')
+            sys.stdout.write('\n' + '\n'.join('  ' + ln for ln in lines))
             sys.stdout.flush()
+            self._lines = len(lines)
+            self._text = tuple(lines)
+
+
+SCREEN = Screen()
+
+
+def header() -> str:
+    total = _batch['total']
+    if not total:
+        return ''
+    return '一共有 %d 张发票' % total
 
 
 def bring_console_front() -> None:
@@ -194,14 +191,16 @@ def _submit(text: str) -> None:
         return
     now = time.time()
     if text == _last_scan['text'] and now - _last_scan['at'] < 3.0:
-        return                                  # 手抖连扫, 直接吃掉
+        return
     _last_scan['text'] = text
     _last_scan['at'] = now
-    _clear_gen[0] += 1                          # 新票: 取消倒计时清屏
+    _clear_gen[0] += 1
     with _lock:
-        if not _batch['active']:                # 新一批开始
+        if not _batch['active']:
             _batch['active'] = True
             _batch['done'] = 0
+            _batch['total'] = 0
+        _batch['total'] += 1
     _scan_queue.put(text)
 
 
@@ -234,6 +233,20 @@ def reader(idle: float = 0.8) -> None:
     _scan_queue.put(None)
 
 
+def countdown(lines_builder, seconds: int = COUNTDOWN) -> bool:
+    """在给定行上倒计时; 来了新票就取消, 返回 False。"""
+    _clear_gen[0] += 1
+    gen = _clear_gen[0]
+    for left in range(seconds, 0, -1):
+        SCREEN.draw(lines_builder(left))
+        for _ in range(20):
+            time.sleep(0.05)
+            if _clear_gen[0] != gen or not _scan_queue.empty():
+                return False
+    SCREEN.clear_to([PROMPT, ''])
+    return True
+
+
 def worker(printer: str) -> None:
     while not _stop.is_set():
         item = _scan_queue.get()
@@ -242,83 +255,101 @@ def worker(printer: str) -> None:
 
         with _lock:
             index = _batch['done'] + 1
+            total_now = _batch['total']
 
-        # 老票重扫: 先判重, 不要先说"正在打印"再告诉人家打过了
         known = sk.cached_id(item)
         if known:
             dup, when = sk.already_printed(known)
             if dup:
-                with _lock:
-                    print()
-                    print('  这张发票 %s 已经打印过一张了。' % when)
-                    print('  如果确实需要再打一张，请联系收费处。')
-                    print()
-                    sys.stdout.flush()
+                def dup_lines(_left=None):
+                    return [header(),
+                            '这张发票 %s 已经打印过一张了。' % when,
+                            '如果确实需要再打一张，请联系收费处。']
+
                 if _scan_queue.empty():
-                    if countdown_and_clear(COUNTDOWN + 5):
+                    if countdown(lambda left: dup_lines() + ['⏳ %d 秒后清屏' % left],
+                                 COUNTDOWN + 5):
                         with _lock:
                             _batch['active'] = False
                             _batch['done'] = 0
+                            _batch['total'] = 0
+                else:
+                    SCREEN.draw(dup_lines())
                 continue
 
-        spinner = Spinner('正在查询第%d张' % index)
-        spinner.start()
+        spinner = {'i': 0}
+
+        def paint() -> None:
+            dots = ['.', '..', '...'][spinner['i'] % 3]
+            SCREEN.draw([header(), '正在打印第 %d 张发票%s' % (index, dots)])
+
+        paint()
+
+        # 点要动起来: 后台每 0.5 秒重绘一次, 顺带把"一共有N张"也刷新
+        anim_stop = threading.Event()
+
+        def animate() -> None:
+            while not anim_stop.is_set():
+                spinner['i'] += 1
+                paint()
+                anim_stop.wait(0.5)
+
+        threading.Thread(target=animate, daemon=True).start()
+
         buf = []
 
         def collect(msg: str) -> None:
             buf.append(msg)
 
-        def on_phase(name: str) -> None:
-            spinner.text = ('正在打印第%d张' if name == 'print'
-                            else '正在查询第%d张') % index
-
         ok = False
         try:
-            ok = run_once(item, printer, False, log=collect, on_phase=on_phase)
+            ok = run_once(item, printer, False, log=collect)
         except Exception:
             buf.append('打印失败，请联系工作人员')
         finally:
-            spinner.stop()
+            anim_stop.set()
 
         with _lock:
-            _batch['done'] += 1
+            if ok:
+                _batch['done'] += 1
             finished = _batch['done']
-
-        with _lock:
-            print()
-            if not ok:
-                last = (buf[-1] if buf else '') or '打印失败，请联系工作人员'
-                for line in last.split('\n'):
-                    if line.strip():
-                        print('  ' + line.strip())
-                print()
-            sys.stdout.flush()
+            still = _batch['total'] - finished
+            active_total = _batch['total']
 
         if not ok:
-            # 失败时不说"全部完成", 只把原因留着, 让人读完再清
+            last = (buf[-1] if buf else '') or '打印失败，请联系工作人员'
+            fail_lines = [header()] + ['  ' + ln.strip()
+                                       for ln in last.split('\n') if ln.strip()]
             if _scan_queue.empty():
-                if countdown_and_clear(COUNTDOWN + 5):
+                if countdown(lambda left: fail_lines + ['⏳ %d 秒后清屏' % left],
+                             COUNTDOWN + 5):
                     with _lock:
                         _batch['active'] = False
                         _batch['done'] = 0
-                bring_console_front()
+                        _batch['total'] = 0
+            else:
+                SCREEN.draw(fail_lines)
+            bring_console_front()
             continue
 
         if _scan_queue.empty():
-            with _lock:
-                print('  %d 张发票已打印完成，请取走发票。' % finished)
-                print()
-                sys.stdout.flush()
-            if countdown_and_clear(COUNTDOWN):
+            summary = '%d 张发票已打印完成，请取走发票' % active_total
+
+            def done_lines(left: int):
+                return [header(), summary, '⏳ %d 秒后清屏' % left]
+
+            if countdown(done_lines, COUNTDOWN):
                 with _lock:
                     _batch['active'] = False
                     _batch['done'] = 0
+                    _batch['total'] = 0
             bring_console_front()
 
 
 def main() -> int:
+    enable_vt()
     setup_console()
-    clear_screen()
+    SCREEN.clear_to([PROMPT, ''])
 
     threading.Thread(target=reader, daemon=True).start()
     threading.Thread(target=worker, args=(DEFAULT_PRINTER,), daemon=True).start()
